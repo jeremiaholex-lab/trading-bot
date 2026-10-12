@@ -1,0 +1,81 @@
+name: AI Trading Bot Autonomous Cloud Runner
+
+on:
+  # Scheduled execution during US Stock Market hours (Monday to Friday)
+  # Runs every 30 minutes between 13:30 UTC and 20:30 UTC (9:30 AM - 4:00 PM EST)
+  schedule:
+    - cron: '*/30 13-20 * * 1-5'
+
+  # Manual trigger: Lets you run the bot anytime in 1 click from GitHub's website/mobile app
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'scan_and_trade'
+        type: choice
+        options:
+          - 'scan_and_trade'
+          - 'optimize_parameters'
+          - 'backtest_spy'
+
+jobs:
+  run-trading-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write  # Allows committing updated strategy_state.json
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Trading Bot (Scheduled Scan & Trade)
+        if: "${{ github.event_name == 'schedule' || github.event.inputs.action == 'scan_and_trade' }}"
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_LIVE: ${{ vars.ALPACA_LIVE || 'False' }}
+          WATCHLIST: ${{ vars.WATCHLIST || 'SPY,QQQ,AAPL,NVDA,MSFT,TSLA,AMD' }}
+          BAR_TIMEFRAME: '15Min'
+          ENABLE_SELF_IMPROVEMENT: 'True'
+        run: |
+          python bot.py --scan
+
+      - name: Run Self-Improvement Parameter Tuning
+        if: "${{ github.event.inputs.action == 'optimize_parameters' }}"
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_LIVE: ${{ vars.ALPACA_LIVE || 'False' }}
+        run: |
+          python bot.py --optimize
+
+      - name: Run Backtest Report (SPY)
+        if: "${{ github.event.inputs.action == 'backtest_spy' }}"
+        run: |
+          python bot.py --backtest SPY
+
+      - name: Save Updated Strategy State (Self-Improvement Memory)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add strategy_state.json || true
+          if git diff --staged --quiet; then
+            echo "No state changes to save."
+          else
+            git commit -m "chore(ai): persist self-improved strategy parameters [skip ci]"
+            git push
+          fi

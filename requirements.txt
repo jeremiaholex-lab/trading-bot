@@ -1,0 +1,10 @@
+alpaca-py>=0.44.0
+yfinance>=1.7.0
+pandas>=2.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+rich>=13.0.0
+schedule>=1.2.0
+fastapi>=0.110.0
+uvicorn>=0.28.0

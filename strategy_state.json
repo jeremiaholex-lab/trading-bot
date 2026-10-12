@@ -1,0 +1,28 @@
+{
+  "symbols": {
+    "SPY": {
+      "params": {
+        "ema_fast": 8,
+        "ema_slow": 21,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 48.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.5,
+        "profit_reward_ratio": 2.5,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 20.0,
+        "profit_factor": 0.56,
+        "sharpe_ratio": -4.28,
+        "max_drawdown_pct": 0.35,
+        "total_trades": 5,
+        "fitness_score": -1.16
+      },
+      "improved": true,
+      "optimized_at": "2026-10-12T16:45:29.217632+00:00"
+    }
+  },
+  "last_updated": "2026-10-12T16:45:29.217632+00:00"
+}

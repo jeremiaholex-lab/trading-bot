@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: ai_trading_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./strategy_state.json:/app/strategy_state.json
+      - ./logs:/app/logs
