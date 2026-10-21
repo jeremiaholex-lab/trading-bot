@@ -1,10 +1,50 @@
+import json
+import time
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Callable, TypeVar
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+def retry_api_call(
+    func: Callable[[], T],
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    operation_name: str = "API Call"
+) -> T:
+    """
+    Executes a callable with exponential backoff retry logic.
+    Retries on transient network errors and unexpected HTTP issues.
+    """
+    last_err: Optional[Exception] = None
+    delay = base_delay
+    for attempt in range(1, max_retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            # Do not retry fatal auth or validation rejections
+            if "insufficient" in err_str or "unauthorized" in err_str or "forbidden" in err_str:
+                raise e
+            if attempt < max_retries:
+                logger.warning(
+                    f"Transient failure during {operation_name} (attempt {attempt}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+                delay *= backoff_factor
+            else:
+                logger.error(f"Permanent failure during {operation_name} after {max_retries} attempts: {e}")
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"Unexpected termination in retry_api_call for {operation_name}")
 
 @dataclass
 class SimulatedPosition:
@@ -29,44 +69,229 @@ class OrderResult:
     take_profit: float
     message: str
 
+
+class BrokerAuthenticationError(RuntimeError):
+    """Raised when Alpaca rejects the configured credentials.
+
+    This is deliberately fatal. Falling back to the local simulator on an
+    authentication failure makes the bot *look* operational while placing no
+    orders at all, which is indistinguishable from a healthy trading day.
+    """
+
+
 class AlpacaBroker:
     """
     Unified broker client for Alpaca (Live/Paper) with zero-config Local Simulator fallback.
     """
 
-    def __init__(self):
+    def __init__(self, force_simulator: bool = False, state_file: Optional[Path] = None):
         self.client = None
         self.is_simulated = True
 
-        if Config.has_alpaca_credentials():
-            try:
-                from alpaca.trading.client import TradingClient
-                self.client = TradingClient(
-                    api_key=Config.ALPACA_API_KEY,
-                    secret_key=Config.ALPACA_SECRET_KEY,
-                    paper=not Config.ALPACA_LIVE
-                )
-                account = self.client.get_account()
-                self.is_simulated = False
-                mode_str = "LIVE" if Config.ALPACA_LIVE else "ALPACA_PAPER"
-                logger.info(f"Connected to Alpaca ({mode_str}). Account #{account.account_number}, Equity: ${float(account.equity):,.2f}")
-            except Exception as e:
-                logger.warning(f"Failed to connect to Alpaca API: {e}. Switching to Local Paper Simulator mode.")
-                self.is_simulated = True
+        if force_simulator:
+            logger.info("Forced into Local Paper Simulator mode (force_simulator=True).")
+        elif Config.has_alpaca_credentials():
+            self._connect_to_alpaca()
         else:
             logger.info("No Alpaca API keys found in .env. Running in Safe Local Paper Simulator mode ($100,000 virtual balance).")
-            self.is_simulated = True
 
         # State for local simulator
         self.sim_cash = 100000.0
         self.sim_positions: Dict[str, SimulatedPosition] = {}
         self.order_counter = 1
 
+        # The simulator's state is persisted so a restart does not silently
+        # wipe open positions. Previously cash and positions lived only in
+        # memory, so every restart reset the account to $100,000 while the
+        # bot kept its tuned strategy parameters.
+        self.state_file = state_file or (Config.BASE_DIR / "simulator_state.json")
+        self._load_sim_state()
+
+    def _load_sim_state(self):
+        """Restores the simulator's cash and positions from disk.
+
+        A corrupt or unreadable file is never fatal -- the simulator simply
+        starts fresh, which is the safe default.
+        """
+        # Only the local simulator has a portfolio to restore. In live mode
+        # the account lives on Alpaca's servers.
+        if not self.is_simulated:
+            return
+        if not self.state_file.exists():
+            return
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.sim_cash = float(data.get("cash", 100000.0))
+            self.order_counter = int(data.get("order_counter", 1))
+            positions = {}
+            for sym, p in (data.get("positions") or {}).items():
+                positions[sym] = SimulatedPosition(
+                    symbol=p["symbol"],
+                    qty=int(p["qty"]),
+                    entry_price=float(p["entry_price"]),
+                    current_price=float(p["current_price"]),
+                    stop_loss=float(p["stop_loss"]),
+                    take_profit=float(p["take_profit"]),
+                    entry_time=p.get("entry_time", ""),
+                )
+            self.sim_positions = positions
+            logger.info(
+                f"Restored simulator state: ${self.sim_cash:,.2f}, {len(self.sim_positions)} open position(s)."
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not read simulator state from {self.state_file}: {e}. Starting fresh."
+            )
+
+    def _save_sim_state(self):
+        """Atomically persists the simulator's cash and positions."""
+        try:
+            payload = {
+                "cash": self.sim_cash,
+                "order_counter": self.order_counter,
+                "positions": {
+                    sym: {
+                        "symbol": p.symbol,
+                        "qty": p.qty,
+                        "entry_price": p.entry_price,
+                        "current_price": p.current_price,
+                        "stop_loss": p.stop_loss,
+                        "take_profit": p.take_profit,
+                        "entry_time": p.entry_time,
+                    }
+                    for sym, p in self.sim_positions.items()
+                },
+            }
+            tmp = self.state_file.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            tmp.replace(self.state_file)
+        except Exception as e:
+            logger.error(f"Failed to save simulator state: {e}")
+
+    def _connect_to_alpaca(self):
+        """Authenticates with Alpaca.
+
+        Raises BrokerAuthenticationError if the credentials are rejected. The
+        only way to proceed in that case is to opt in to the simulator
+        explicitly via ALLOW_SIMULATOR_FALLBACK=True.
+        """
+        from alpaca.trading.client import TradingClient
+
+        try:
+            self.client = TradingClient(
+                api_key=Config.ALPACA_API_KEY,
+                secret_key=Config.ALPACA_SECRET_KEY,
+                paper=not Config.ALPACA_LIVE
+            )
+            account = retry_api_call(
+                lambda: self.client.get_account(),
+                max_retries=2,
+                base_delay=1.0,
+                operation_name="Alpaca Account Authentication"
+            )
+        except Exception as e:
+            if Config.ALLOW_SIMULATOR_FALLBACK:
+                logger.warning(
+                    f"Failed to connect to Alpaca API: {e}. "
+                    f"ALLOW_SIMULATOR_FALLBACK is enabled, switching to Local Paper Simulator mode."
+                )
+                self.is_simulated = True
+                return
+
+            raise BrokerAuthenticationError(
+                f"Alpaca rejected the configured credentials: {e}. "
+                f"The bot will NOT silently fall back to the local simulator, because that "
+                f"trades nothing while appearing to trade. Fix the keys in .env "
+                f"(run: python set_alpaca_keys.py), or set ALLOW_SIMULATOR_FALLBACK=True "
+                f"to deliberately run on the simulator instead."
+            ) from e
+
+        self.is_simulated = False
+        mode_str = "LIVE" if Config.ALPACA_LIVE else "ALPACA_PAPER"
+        logger.info(f"Connected to Alpaca ({mode_str}). Account #{account.account_number}, Equity: ${float(account.equity):,.2f}")
+
+    def get_market_clock(self) -> Dict[str, Any]:
+        """
+        Returns market clock info: is_open, next_open, next_close.
+        Uses Alpaca API when connected, otherwise falls back to US Eastern timezone schedule.
+        """
+        if not self.is_simulated and self.client:
+            try:
+                clock = retry_api_call(
+                    lambda: self.client.get_clock(),
+                    max_retries=2,
+                    base_delay=1.0,
+                    operation_name="get_clock"
+                )
+                return {
+                    "is_open": clock.is_open,
+                    "next_open": clock.next_open,
+                    "next_close": clock.next_close,
+                }
+            except Exception as e:
+                logger.warning(f"Failed to fetch Alpaca market clock: {e}. Using timezone fallback.")
+
+        from zoneinfo import ZoneInfo
+        return self._simulated_clock(datetime.now(ZoneInfo("America/New_York")))
+
+    def _simulated_clock(self, et_now=None) -> Dict[str, Any]:
+        """Timezone-based market clock used when Alpaca is not connected.
+
+        Crucially, this always reports a `next_open` while the market is
+        closed. It previously returned None after the close, which sent the
+        trading loop into a 5-minute poll loop for the entire night and
+        weekend instead of sleeping until the next session.
+        """
+        from zoneinfo import ZoneInfo
+
+        if et_now is None:
+            et_now = datetime.now(ZoneInfo("America/New_York"))
+
+        weekday = et_now.weekday()  # Monday=0, Sunday=6
+
+        # Market open Mon-Fri 9:30 AM - 4:00 PM ET
+        market_open_time = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close_time = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
+
+        is_open = (0 <= weekday <= 4) and (market_open_time <= et_now <= market_close_time)
+
+        if is_open:
+            return {
+                "is_open": True,
+                "next_open": None,
+                "next_close": market_close_time,
+            }
+
+        # Find the next weekday session.
+        days_ahead = 1
+        candidate = (et_now + timedelta(days=1)).replace(
+            hour=9, minute=30, second=0, microsecond=0
+        )
+        while candidate.weekday() > 4:
+            candidate += timedelta(days=1)
+
+        # If it is a weekday but before the open, today's session is next.
+        if et_now.weekday() <= 4 and et_now < market_open_time:
+            candidate = market_open_time
+
+        return {
+            "is_open": False,
+            "next_open": candidate,
+            "next_close": None,
+        }
+
     def get_account_summary(self) -> Dict[str, Any]:
         """Returns account equity, cash, and active mode."""
         if not self.is_simulated and self.client:
             try:
-                acc = self.client.get_account()
+                acc = retry_api_call(
+                    lambda: self.client.get_account(),
+                    max_retries=3,
+                    base_delay=1.0,
+                    operation_name="get_account"
+                )
                 return {
                     "equity": float(acc.equity),
                     "cash": float(acc.cash),
@@ -88,11 +313,60 @@ class AlpacaBroker:
             "currency": "USD"
         }
 
+    def _get_protective_order_prices(self) -> tuple:
+        """Reads the stop and take-profit prices from the open orders.
+
+        Alpaca keeps the protective stop and take-profit as separate open
+        orders. The position object does not carry their prices, so without
+        this the trailing-stop logic would have no stop to compare against
+        and would skip every live position.
+
+        Returns (stop_prices, limit_prices) keyed by symbol.
+        """
+        stops: Dict[str, float] = {}
+        limits: Dict[str, float] = {}
+
+        if self.is_simulated or not self.client:
+            return stops, limits
+
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+
+            orders = self.client.get_orders(
+                GetOrdersRequest(status="open", limit=100)
+            )
+        except Exception as e:
+            logger.warning(f"Could not read open orders for protective prices: {e}")
+            return stops, limits
+
+        for order in orders or []:
+            try:
+                order_type = str(getattr(order, "type", "") or "").lower()
+                symbol = order.symbol
+                if "stop" in order_type and getattr(order, "stop_price", None):
+                    stops[symbol] = float(order.stop_price)
+                elif "limit" in order_type and getattr(order, "limit_price", None):
+                    limits[symbol] = float(order.limit_price)
+            except Exception:
+                continue
+
+        return stops, limits
+
     def get_open_positions(self) -> Dict[str, Dict[str, Any]]:
         """Returns dictionary of active open positions keyed by symbol."""
         if not self.is_simulated and self.client:
             try:
-                positions = self.client.get_all_positions()
+                positions = retry_api_call(
+                    lambda: self.client.get_all_positions(),
+                    max_retries=3,
+                    base_delay=1.0,
+                    operation_name="get_all_positions"
+                )
+                # The live stop price lives on the open stop order, not on the
+                # position. Without it the trailing-stop logic has nothing to
+                # compare against and silently skips every position.
+                stops, limits = self._get_protective_order_prices()
+
                 result = {}
                 for p in positions:
                     result[p.symbol] = {
@@ -101,7 +375,9 @@ class AlpacaBroker:
                         "entry_price": float(p.avg_entry_price),
                         "current_price": float(p.current_price),
                         "unrealized_pl": float(p.unrealized_pl),
-                        "unrealized_plpc": float(p.unrealized_plpc) * 100
+                        "unrealized_plpc": float(p.unrealized_plpc) * 100,
+                        "stop_loss": stops.get(p.symbol, 0.0),
+                        "take_profit": limits.get(p.symbol, 0.0),
                     }
                 return result
             except Exception as e:
@@ -149,7 +425,12 @@ class AlpacaBroker:
                     take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)),
                     stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2))
                 )
-                order = self.client.submit_order(req)
+                order = retry_api_call(
+                    lambda: self.client.submit_order(req),
+                    max_retries=2,
+                    base_delay=1.0,
+                    operation_name=f"submit_order({symbol})"
+                )
                 return OrderResult(
                     success=True,
                     order_id=str(order.id),
@@ -200,6 +481,7 @@ class AlpacaBroker:
             take_profit=take_profit_price,
             entry_time=datetime.now(timezone.utc).isoformat()
         )
+        self._save_sim_state()
 
         return OrderResult(
             success=True,
@@ -211,6 +493,175 @@ class AlpacaBroker:
             take_profit=take_profit_price,
             message=f"Filled in Local Simulator at ${entry_price:.2f}"
         )
+
+    def _cancel_symbol_orders(self, symbol: str, order_types: Optional[tuple] = None) -> List[str]:
+        """
+        Cancels open orders for a symbol and returns the ids cancelled.
+
+        The shares of a position opened with a bracket order are *held* by
+        the open stop-loss and take-profit orders. Alpaca rejects a sell
+        with "insufficient qty available for order (requested: 13,
+        available: 0)" unless those protective orders are cancelled first.
+
+        `order_types` restricts the cancellation to matching order types
+        (e.g. only stops). This matters when trailing a stop: cancelling
+        every order would throw away the take-profit as well.
+
+        Note: alpaca-py's TradingClient has no `cancel_open_orders`; the
+        real surface is `get_orders` plus `cancel_order_by_id`.
+        """
+        cancelled = []
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+
+            orders = self.client.get_orders(
+                GetOrdersRequest(status="open", symbols=[symbol], limit=100)
+            )
+        except Exception as e:
+            logger.warning(f"Could not list open orders for {symbol}: {e}")
+            return cancelled
+
+        for order in orders or []:
+            try:
+                order_type = str(getattr(order, "type", "") or "").lower()
+                if order_types and not any(t in order_type for t in order_types):
+                    continue
+                self.client.cancel_order_by_id(order.id)
+                cancelled.append(str(order.id))
+            except Exception as e:
+                logger.warning(f"Could not cancel order {order.id} for {symbol}: {e}")
+
+        if cancelled:
+            logger.info(f"Cancelled {len(cancelled)} open order(s) for {symbol}.")
+        return cancelled
+
+    def place_close_position_order(self, symbol: str, qty: int, reason: str = "") -> OrderResult:
+        """
+        Closes an open position at market.
+
+        Used to act on a SELL signal. The bracket orders attached to the
+        original entry hold the shares, so they are cancelled first.
+        """
+        if not self.is_simulated and self.client:
+            try:
+                from alpaca.trading.requests import MarketOrderRequest
+                from alpaca.trading.enums import OrderSide, TimeInForce
+
+                self._cancel_symbol_orders(symbol)
+
+                req = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC,
+                )
+                order = retry_api_call(
+                    lambda: self.client.submit_order(req),
+                    max_retries=2,
+                    base_delay=1.0,
+                    operation_name=f"close_position({symbol})"
+                )
+                return OrderResult(
+                    success=True,
+                    order_id=str(order.id),
+                    symbol=symbol,
+                    qty=qty,
+                    entry_price=0.0,
+                    stop_loss=0.0,
+                    take_profit=0.0,
+                    message=f"Close order submitted for {symbol}. Status: {order.status}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to submit Alpaca close order for {symbol}: {e}")
+                return OrderResult(
+                    success=False,
+                    order_id="",
+                    symbol=symbol,
+                    qty=qty,
+                    entry_price=0.0,
+                    stop_loss=0.0,
+                    take_profit=0.0,
+                    message=f"Close order rejected: {e}"
+                )
+
+        # Local Simulator Execution
+        position = self.sim_positions.get(symbol)
+        if position is None:
+            return OrderResult(
+                success=False, order_id="", symbol=symbol, qty=qty,
+                entry_price=0.0, stop_loss=0.0, take_profit=0.0,
+                message=f"No open position for {symbol}.",
+            )
+
+        proceeds = position.qty * position.current_price
+        self.sim_cash += proceeds
+        pnl = (position.current_price - position.entry_price) * position.qty
+        del self.sim_positions[symbol]
+        self._save_sim_state()
+
+        order_id = f"SIM-CLOSE-{self.order_counter}"
+        self.order_counter += 1
+
+        return OrderResult(
+            success=True,
+            order_id=order_id,
+            symbol=symbol,
+            qty=position.qty,
+            entry_price=position.entry_price,
+            stop_loss=0.0,
+            take_profit=0.0,
+            message=f"Closed {position.qty} shares of {symbol} at ${position.current_price:.2f} "
+                    f"(P&L: ${pnl:+,.2f}){(' - ' + reason) if reason else ''}"
+        )
+
+    def update_trailing_stop(self, symbol: str, new_stop: float) -> bool:
+        """
+        Moves the protective stop on an open position.
+
+        In Alpaca mode the bracket stop is replaced with a new stop order.
+        In simulator mode the stop recorded on the position is updated.
+        """
+        if not self.is_simulated and self.client:
+            try:
+                from alpaca.trading.requests import StopOrderRequest
+                from alpaca.trading.enums import OrderSide, TimeInForce
+
+                # Replace the existing protective stop: Alpaca rejects a
+                # second stop order on the same position while the first is
+                # still open. Only the STOP is cancelled -- the take-profit
+                # must stay in place.
+                self._cancel_symbol_orders(symbol, order_types=("stop",))
+
+                position = self.get_open_positions().get(symbol)
+                qty = int(position.get("qty", 0)) if position else 0
+                if qty <= 0:
+                    logger.warning(f"Cannot trail {symbol}: no open position.")
+                    return False
+
+                req = StopOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    type="stop",
+                    time_in_force=TimeInForce.GTC,
+                    stop_price=round(new_stop, 2),
+                )
+                order = self.client.submit_order(req)
+                logger.info(f"Trailing stop for {symbol} moved to ${new_stop:.2f} (order {order.id})")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update trailing stop for {symbol}: {e}")
+                return False
+
+        position = self.sim_positions.get(symbol)
+        if position is None:
+            return False
+        # A trailing stop must never loosen.
+        if new_stop <= position.stop_loss:
+            return False
+        position.stop_loss = round(new_stop, 2)
+        self._save_sim_state()
+        return True
 
     def update_simulated_prices(self, price_map: Dict[str, float]) -> List[str]:
         """
@@ -244,5 +695,8 @@ class AlpacaBroker:
 
         for sym in to_remove:
             del self.sim_positions[sym]
+
+        if to_remove:
+            self._save_sim_state()
 
         return exits

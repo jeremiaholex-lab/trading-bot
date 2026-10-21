@@ -7,3 +7,35 @@ env/
 venv/
 logs/*.log
 .git/
+
+# Runtime output captures. These embed the Alpaca account number and
+# portfolio positions, so they must never be committed. Individual names
+# are listed for the historical files; the globs below catch new captures,
+# which previously slipped through whenever a run wrote a new filename
+# (full_out.txt, ws_out.txt, ...).
+scan_output.txt
+scan_debug.txt
+scan_full.log
+full_output.txt
+*.log
+*.out
+ws_out.txt
+*_out.txt
+*_output.txt
+
+# Calibration and backtest dumps. Raw per-origin rows, useful locally,
+# never a source file.
+calibration_*.json
+
+# Strategy state is tracked (it is the bot's learned parameters), but
+# atomic-write temporaries are not.
+strategy_state.tmp
+*.tmp
+
+# Simulator portfolio state (positions + cash)
+simulator_state.json
+simulator_state.tmp
+
+# Strategy state backups
+strategy_state_backup_*.json
+strategy_state.json.pre_fix_backup

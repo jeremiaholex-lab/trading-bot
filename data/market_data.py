@@ -46,10 +46,15 @@ class MarketDataProvider:
                     "15Min": (15, TimeFrameUnit.Minute),
                     "1Hour": (1, TimeFrameUnit.Hour),
                     "1Day": (1, TimeFrameUnit.Day),
-                    "15m": (15, TimeFrameUnit.Minute),
-                    "1d": (1, TimeFrameUnit.Day)
                 }
-                amount, unit = unit_map.get(timeframe, (15, TimeFrameUnit.Minute))
+                if timeframe not in unit_map:
+                    raise ValueError(
+                        f"Unsupported timeframe {timeframe!r}. "
+                        f"Supported: {sorted(unit_map)}. "
+                        f"(Config.validate() rejects these, so reaching this "
+                        f"point means the config and data layer disagree.)"
+                    )
+                amount, unit = unit_map[timeframe]
                 tf = TimeFrame(amount, unit)
 
                 end_dt = datetime.now(timezone.utc)
@@ -87,13 +92,17 @@ class MarketDataProvider:
             "1Min": "1m",
             "5Min": "5m",
             "15Min": "15m",
-            "15m": "15m",
             "1Hour": "1h",
-            "1h": "1h",
             "1Day": "1d",
-            "1d": "1d"
         }
-        interval = yf_interval_map.get(timeframe, "15m")
+        if timeframe not in yf_interval_map:
+            raise ValueError(
+                f"Unsupported timeframe {timeframe!r}. "
+                f"Supported: {sorted(yf_interval_map)}. "
+                f"(Config.validate() rejects these, so reaching this "
+                f"point means the config and data layer disagree.)"
+            )
+        interval = yf_interval_map[timeframe]
 
         # Yahoo finance allows max 60 days for 15m/5m intervals
         if interval in ["1m", "5m", "15m"] and days_back > 59:

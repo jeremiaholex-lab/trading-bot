@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 class TechnicalIndicators:
-    """Computes technical indicators and market regime analytics on OHLCV data."""
+    """Computes technical indicators, VWAP, multi-timeframe trends, and market regime analytics on OHLCV data."""
 
     @staticmethod
     def add_all_indicators(
@@ -16,7 +16,7 @@ class TechnicalIndicators:
     ) -> pd.DataFrame:
         """
         Enriches a DataFrame containing ['Open', 'High', 'Low', 'Close', 'Volume']
-        with all necessary mathematical indicators.
+        with all necessary mathematical indicators, VWAP, and multi-timeframe alignment.
         """
         df = df.copy()
 
@@ -65,12 +65,19 @@ class TechnicalIndicators:
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-        # 6. Volume Moving Average
+        # 6. Volume Moving Average & VWAP (Volume Weighted Average Price)
         df['Volume_SMA20'] = volume.rolling(window=20).mean()
         df['Volume_Ratio'] = volume / (df['Volume_SMA20'] + 1e-9)
 
-        # 7. Market Regime Identification
-        # Regimes: 'TRENDING_BULL', 'TRENDING_BEAR', 'RANGING', 'HIGH_VOLATILITY'
+        typical_price = (high + low + close) / 3.0
+        pv = typical_price * volume
+        df['VWAP'] = pv.cumsum() / (volume.cumsum() + 1e-9)
+
+        # 7. Multi-Timeframe Trend Confirmation (Macro trend + Higher timeframe proxy)
+        df['Macro_Trend'] = np.where(close > df['EMA_200'], 1, -1)
+        df['MTF_Bullish'] = (close > df['EMA_50']) & (df['EMA_50'] > df['EMA_200'])
+
+        # 8. Market Regime Identification
         df['Regime'] = TechnicalIndicators.detect_regime(df, ema_fast, ema_slow)
 
         return df
@@ -79,7 +86,7 @@ class TechnicalIndicators:
     def detect_regime(df: pd.DataFrame, ema_fast: int, ema_slow: int) -> pd.Series:
         """
         Classifies the prevailing market condition for each bar.
-        - TRENDING_BULL: Fast EMA > Slow EMA, Price > 200 EMA (or 50 EMA), MACD > 0
+        - TRENDING_BULL: Fast EMA > Slow EMA, Price > 200 EMA (or 50 EMA), MACD > 0, MTF Bullish
         - TRENDING_BEAR: Fast EMA < Slow EMA, Price < 200 EMA (or 50 EMA), MACD < 0
         - HIGH_VOLATILITY: ATR % in top 90th percentile or BB Width spiking
         - RANGING: EMAs flat/intertwined, moderate ATR
@@ -88,13 +95,14 @@ class TechnicalIndicators:
         slow = df[f'EMA_{ema_slow}']
         close = df['Close']
         ema_50 = df['EMA_50']
+        mtf_bull = df.get('MTF_Bullish', pd.Series(True, index=df.index))
 
         # Volatility spike threshold (rolling 90th percentile of ATR_Pct)
         atr_pct = df['ATR_Pct']
         rolling_atr_high = atr_pct.rolling(window=50, min_periods=10).quantile(0.90)
         is_high_vol = atr_pct > (rolling_atr_high * 1.25)
 
-        is_bull = (fast > slow) & (close > ema_50) & (df['MACD'] > 0)
+        is_bull = (fast > slow) & (close > ema_50) & (df['MACD'] > 0) & mtf_bull
         is_bear = (fast < slow) & (close < ema_50) & (df['MACD'] < 0)
 
         regime = pd.Series('RANGING', index=df.index)

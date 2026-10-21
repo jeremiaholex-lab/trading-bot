@@ -1,11 +1,127 @@
 {
+  "version": 1,
   "symbols": {
     "SPY": {
       "params": {
-        "ema_fast": 8,
+        "ema_fast": 13,
         "ema_slow": 21,
         "rsi_period": 14,
         "rsi_buy_threshold": 48.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.8,
+        "profit_reward_ratio": 1.8,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 33.33,
+        "profit_factor": 1.14,
+        "sharpe_ratio": 0.32,
+        "max_drawdown_pct": 2.25,
+        "total_trades": 12,
+        "fitness_score": 1.07
+      },
+      "improved": true,
+      "optimized_at": "2026-10-21T16:41:14.468304+00:00"
+    },
+    "QQQ": {
+      "params": {
+        "ema_fast": 13,
+        "ema_slow": 26,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 38.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.5,
+        "profit_reward_ratio": 1.8,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 36.36,
+        "profit_factor": 1.57,
+        "sharpe_ratio": 0.72,
+        "max_drawdown_pct": 3.03,
+        "total_trades": 11,
+        "fitness_score": 1.41
+      },
+      "improved": true,
+      "optimized_at": "2026-10-21T16:41:42.947991+00:00"
+    },
+    "AAPL": {
+      "params": {
+        "ema_fast": 9,
+        "ema_slow": 34,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 48.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.5,
+        "profit_reward_ratio": 2.0,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 50.0,
+        "profit_factor": 1.93,
+        "sharpe_ratio": 2.23,
+        "max_drawdown_pct": 5.1,
+        "total_trades": 20,
+        "fitness_score": 2.37
+      },
+      "improved": false,
+      "optimized_at": "2026-10-21T16:42:12.480805+00:00"
+    },
+    "NVDA": {
+      "params": {
+        "ema_fast": 9,
+        "ema_slow": 21,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 42.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.8,
+        "profit_reward_ratio": 2.0,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 50.0,
+        "profit_factor": 2.17,
+        "sharpe_ratio": 1.47,
+        "max_drawdown_pct": 4.85,
+        "total_trades": 8,
+        "fitness_score": 2.13
+      },
+      "improved": false,
+      "optimized_at": "2026-10-21T16:43:03.162346+00:00"
+    },
+    "MSFT": {
+      "params": {
+        "ema_fast": 9,
+        "ema_slow": 21,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 42.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.8,
+        "profit_reward_ratio": 2.0,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 41.67,
+        "profit_factor": 1.51,
+        "sharpe_ratio": 0.98,
+        "max_drawdown_pct": 3.95,
+        "total_trades": 12,
+        "fitness_score": 1.58
+      },
+      "improved": false,
+      "optimized_at": "2026-10-21T16:44:14.536527+00:00"
+    },
+    "TSLA": {
+      "params": {
+        "ema_fast": 13,
+        "ema_slow": 21,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 42.0,
         "rsi_sell_threshold": 70.0,
         "atr_period": 14,
         "atr_stop_multiplier": 1.5,
@@ -13,16 +129,39 @@
         "min_volume_ratio": 0.8
       },
       "performance": {
-        "win_rate": 20.0,
-        "profit_factor": 0.56,
-        "sharpe_ratio": -4.28,
-        "max_drawdown_pct": 0.35,
-        "total_trades": 5,
-        "fitness_score": -1.16
+        "win_rate": 28.57,
+        "profit_factor": 0.92,
+        "sharpe_ratio": -0.23,
+        "max_drawdown_pct": 9.72,
+        "total_trades": 14,
+        "fitness_score": 0.46
       },
-      "improved": true,
-      "optimized_at": "2026-10-12T16:45:29.217632+00:00"
+      "improved": false,
+      "optimized_at": "2026-10-21T16:45:16.056480+00:00"
+    },
+    "AMD": {
+      "params": {
+        "ema_fast": 9,
+        "ema_slow": 21,
+        "rsi_period": 14,
+        "rsi_buy_threshold": 42.0,
+        "rsi_sell_threshold": 70.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.8,
+        "profit_reward_ratio": 2.0,
+        "min_volume_ratio": 0.8
+      },
+      "performance": {
+        "win_rate": 33.33,
+        "profit_factor": 1.08,
+        "sharpe_ratio": -0.09,
+        "max_drawdown_pct": 10.95,
+        "total_trades": 6,
+        "fitness_score": 0.63
+      },
+      "improved": false,
+      "optimized_at": "2026-10-21T16:46:00.923932+00:00"
     }
   },
-  "last_updated": "2026-10-12T16:45:29.217632+00:00"
+  "last_updated": "2026-10-21T16:46:00.923932+00:00"
 }

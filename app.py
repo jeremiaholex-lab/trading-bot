@@ -1,6 +1,8 @@
 import threading
 import time
-from datetime import datetime
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
@@ -8,31 +10,94 @@ import uvicorn
 from config import Config
 from bot import TradingBotOrchestrator
 
-app = FastAPI(title="AI Trading Bot Dashboard")
 orchestrator = None
 bot_thread = None
+bot_error = None
+
+
+def _utc_timestamp(now=None) -> str:
+    """Formats a UTC timestamp.
+
+    The dashboard used to call datetime.now() and label it "UTC", which
+    displayed local time under a UTC label.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _bot_status(orchestrator=None, thread=None) -> dict:
+    """Describes the health of the background trading loop.
+
+    If the worker thread died -- for example because configuration
+    validation raised inside it -- the dashboard used to keep showing
+    "$0.00" and "INITIALIZING..." forever with no indication of failure.
+    """
+    if bot_error:
+        return {
+            "healthy": False,
+            "message": f"Trading loop crashed: {bot_error}",
+            "mode": "ERROR",
+        }
+
+    if orchestrator is None:
+        return {
+            "healthy": False,
+            "message": "Trading loop has not started yet.",
+            "mode": "INITIALIZING...",
+        }
+
+    if thread is not None and not thread.is_alive():
+        return {
+            "healthy": False,
+            "message": "Trading loop is no longer running. It exited unexpectedly.",
+            "mode": "STOPPED",
+        }
+
+    return {
+        "healthy": True,
+        "message": "Trading loop is running.",
+        "mode": "LIVE AUTOPILOT",
+    }
+
 
 def run_trading_bot_worker():
     """Background worker loop running the trading orchestrator continuously."""
-    global orchestrator
-    orchestrator = TradingBotOrchestrator()
-    orchestrator.start_live_loop(interval_seconds=60, auto_calibrate=True)
+    global orchestrator, bot_error
+    try:
+        orchestrator = TradingBotOrchestrator()
+        orchestrator.start_live_loop(interval_seconds=60, auto_calibrate=True)
+    except Exception as e:
+        # Previously this exception killed the daemon thread silently and the
+        # dashboard carried on displaying "$0.00" as though nothing were wrong.
+        bot_error = f"{type(e).__name__}: {e}"
+        logging.getLogger("app").critical("Trading loop died: %s", bot_error, exc_info=True)
 
-@app.on_event("startup")
-def startup_event():
-    """Launch the trading bot in a background thread when the server starts."""
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Starts the trading loop when the server starts."""
     global bot_thread
     bot_thread = threading.Thread(target=run_trading_bot_worker, daemon=True)
     bot_thread.start()
+    yield
+
+
+app = FastAPI(title="AI Trading Bot Dashboard", lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 def index():
     """Live web dashboard displaying account equity, open positions, and status."""
     acc = {"equity": 0.0, "cash": 0.0, "buying_power": 0.0, "mode": "INITIALIZING..."}
     open_pos = {}
+    status = _bot_status(orchestrator, bot_thread)
     if orchestrator and orchestrator.broker:
         acc = orchestrator.broker.get_account_summary()
         open_pos = orchestrator.broker.get_open_positions()
+        acc = dict(acc)
+        acc["mode"] = status["mode"]
 
     positions_html = ""
     if open_pos:
@@ -178,10 +243,13 @@ def index():
 
             <div class="card" style="font-size: 13px; color: #9CA3AF;">
                 <p style="margin: 0;">
-                    🛡️ <b>Risk Protection Active:</b> 1.5% max risk per trade • Server-side bracket stops • Daily 3% circuit breaker
+                    🛡️ <b>Risk Protection Active:</b> {Config.MAX_PORTFOLIO_RISK_PER_TRADE * 100:.1f}% max risk per trade • Server-side bracket stops • Daily {Config.DAILY_DRAWDOWN_LIMIT * 100:.0f}% circuit breaker
+                </p>
+                <p style="margin: 4px 0 0; color: {'#10B981' if status['healthy'] else '#EF4444'};">
+                    ● {status['message']}
                 </p>
                 <p style="margin: 4px 0 0;">
-                    Auto-refreshes every 30 seconds. Last updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")}
+                    Auto-refreshes every 30 seconds. Last updated: {_utc_timestamp()}
                 </p>
             </div>
         </div>

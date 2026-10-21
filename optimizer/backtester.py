@@ -1,8 +1,17 @@
-from dataclasses import dataclass
-from typing import List, Dict, Any
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import List, Dict, Optional, Any, Callable, TypeVar
 import numpy as np
 import pandas as pd
+from config import Config
 from strategy.adaptive_strategy import AdaptiveStrategy, StrategyParameters
+
+T = TypeVar("T")
+
+# A Sharpe ratio above this is not a measure of edge -- it is an artefact of
+# a tiny sample. Real money managers do not sustain Sharpe ratios above ~3.
+MAX_PLAUSIBLE_SHARPE = 5.0
+
 
 @dataclass
 class BacktestResult:
@@ -16,8 +25,51 @@ class BacktestResult:
     sharpe_ratio: float
     fitness_score: float
 
+
 class StrategyBacktester:
     """Fast vectorized & event backtester for parameter evaluation."""
+
+    @staticmethod
+    def _annualised_sharpe(equity_curve: List[float], index) -> float:
+        """Annualised Sharpe ratio computed from DAILY equity returns.
+
+        Two mistakes are avoided here:
+
+        1. Annualising a handful of TRADE returns with sqrt(252) implicitly
+           claims the strategy trades 252 times a year. With 7 trades over
+           200 bars that is a claim of 36 years of trading, and the ratio
+           exploded into the hundreds (measured: Sharpe 1096).
+        2. Annualising per-bar returns of a 15-minute series by sqrt(6500)
+           produces equally nonsensical numbers.
+
+        Resampling the marked-to-market equity curve to daily closes and
+        annualising with sqrt(252) is the standard approach.
+        """
+        if len(equity_curve) < 3:
+            return 0.0
+
+        if isinstance(index, pd.DatetimeIndex):
+            series = pd.Series(equity_curve, index=index)
+            daily = series.resample("1D").last().dropna()
+            daily_returns = daily.pct_change().dropna()
+        else:
+            # No timestamps available; treat each bar as one period.
+            values = np.array(equity_curve, dtype=float)
+            daily_returns = pd.Series(values).pct_change().dropna()
+
+        if len(daily_returns) < 2:
+            return 0.0
+
+        std = float(np.std(daily_returns))
+        if std <= 0:
+            return 0.0
+
+        sharpe = (float(np.mean(daily_returns)) / std) * np.sqrt(252.0)
+
+        # A Sharpe ratio beyond a handful is an artefact of a tiny sample or
+        # of near-perfect synthetic data, not a measure of edge. Clipping
+        # keeps it from dominating the fitness score.
+        return float(np.clip(sharpe, -MAX_PLAUSIBLE_SHARPE, MAX_PLAUSIBLE_SHARPE))
 
     @staticmethod
     def run_backtest(
@@ -47,7 +99,10 @@ class StrategyBacktester:
         entry_price = 0.0
         stop_loss = 0.0
         take_profit = 0.0
-        trades: List[float] = [] # list of pnl percentages
+        cash = initial_capital          # realised capital
+        trades: List[float] = []        # list of pnl percentages
+        equity_curve: List[float] = []  # bar-by-bar marked-to-market equity
+        curve_index: List[Any] = []     # timestamps aligned with equity_curve
 
         for i in range(50, len(df_ind)):
             curr = df_ind.iloc[i]
@@ -92,17 +147,34 @@ class StrategyBacktester:
                 if low <= stop_loss:
                     pnl = (stop_loss - entry_price) / entry_price
                     trades.append(pnl)
+                    cash *= (1.0 + pnl)
                     in_position = False
                 # 2. Take profit hit
                 elif high >= take_profit:
                     pnl = (take_profit - entry_price) / entry_price
                     trades.append(pnl)
+                    cash *= (1.0 + pnl)
                     in_position = False
                 # 3. Dynamic trend reversal exit
                 elif str(curr['Regime']) == "TRENDING_BEAR" and float(curr['RSI']) > params.rsi_sell_threshold:
                     pnl = (close - entry_price) / entry_price
                     trades.append(pnl)
+                    cash *= (1.0 + pnl)
                     in_position = False
+
+            # Mark the portfolio to market on every bar. The Sharpe ratio is
+            # computed from this curve, not from the handful of trade
+            # returns, so it reflects what the equity actually did.
+            #
+            # The position is treated as a full-notional fraction of the
+            # portfolio, so the unrealised move is converted from a price
+            # difference into a portfolio return before it is added.
+            if in_position:
+                unrealised = (close - entry_price) / entry_price
+                equity_curve.append(cash * (1.0 + unrealised))
+            else:
+                equity_curve.append(cash)
+            curve_index.append(df_ind.index[i])
 
         if not trades:
             return BacktestResult(
@@ -119,11 +191,7 @@ class StrategyBacktester:
         total_loss = abs(sum(losses))
         profit_factor = round(total_gain / (total_loss + 1e-9), 2) if total_loss > 0 else (5.0 if total_gain > 0 else 1.0)
 
-        # Equity curve & Max Drawdown
-        equity_curve = [initial_capital]
-        for t in trades:
-            equity_curve.append(equity_curve[-1] * (1.0 + t))
-
+        # Equity curve & Max Drawdown (measured bar by bar)
         peak = equity_curve[0]
         max_dd = 0.0
         for eq in equity_curve:
@@ -135,18 +203,18 @@ class StrategyBacktester:
 
         total_pnl_pct = (equity_curve[-1] - initial_capital) / initial_capital
 
-        # Annualized Sharpe approximation
-        std_returns = np.std(trades) if len(trades) > 1 else 1e-9
-        sharpe = (np.mean(trades) / (std_returns + 1e-9)) * np.sqrt(252) if std_returns > 0 else 0.0
+        # Sharpe ratio from the DAILY equity curve.
+        sharpe = StrategyBacktester._annualised_sharpe(equity_curve, pd.Index(curve_index))
 
         # Institutional Fitness Score:
         # Prioritizes Sharpe, Profit Factor, and Win Rate while heavily penalizing Drawdowns
         penalty_dd = max_dd * 3.0
         fitness = (sharpe * 0.4) + (profit_factor * 0.3) + (win_rate * 2.0) + (total_pnl_pct * 0.5) - penalty_dd
 
-        # Filter out random flukes with less than 3 trades
-        if len(trades) < 3:
-            fitness -= 2.0
+        # A handful of trades is not evidence. Penalise thin samples so the
+        # optimizer does not rank a lucky two-trade run above a robust one.
+        if len(trades) < Config.MIN_TRADES_TO_ADOPT:
+            fitness -= (Config.MIN_TRADES_TO_ADOPT - len(trades)) * 0.5
 
         return BacktestResult(
             total_trades=len(trades),
