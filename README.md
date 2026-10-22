@@ -1,176 +1,202 @@
-# 🤖 Adaptive AI Trading Bot (Stocks & ETFs)
+# 🤖 Adaptive Quant Trading Bot — US Equities & ETFs
 
-An institutional-grade, self-improving quantitative trading bot designed for US Equities and ETFs. Built to trade with strict risk management, regime awareness, and automated parameter adaptation.
+A self-improving algorithmic trading bot for US stocks and ETFs. It reads the market, classifies the regime, sizes its risk, and places bracket orders through Alpaca — then re-tunes its own parameters overnight and tells you what happened.
 
----
-
-## 🌟 Key Features
-
-1. **Market Regime Detection**:
-   - Classifies market conditions into **Bull Trend**, **Bear Trend**, **Ranging (Mean Reversion)**, and **High Volatility**.
-   - Refuses to buy into falling knives or choppy volatility spikes.
-2. **Asymmetric Risk/Reward Strategy**:
-   - Buys low-risk pullbacks in confirmed uptrends (tests of dynamic EMA support with RSI dip + volume confirmation).
-   - Exploits Bollinger Band mean reversion during ranging markets.
-   - Requires a minimum 1.8x to 2.5x Reward-to-Risk ratio on all entries.
-3. **Institutional Risk Management ("Protecting Capital")**:
-   - **Volatility Sizing**: Dynamically calculates position size so that no trade risks more than 1.5% of portfolio equity (based on Average True Range).
-   - **Server-Side Bracket Orders**: Every trade automatically attaches an OCO (One-Cancels-Other) Stop-Loss and Take-Profit.
-   - **Daily Circuit Breaker**: Automatically halts trading if daily drawdown reaches 3%.
-4. **Self-Improving Parameter Optimizer**:
-   - Runs **Walk-Forward Validation** (70% train / 30% test) to dynamically self-tune strategy parameters (EMAs, RSI buy zones, ATR stops).
-   - The held-out slice is scored **once**, on the single candidate that won the training phase. Ranking candidates by their held-out score would turn the test set into a second training set.
-   - New parameters are adopted only if they clear the the held-out gates: `MIN_FITNESS_TO_ADOPT` (default `0.0`), `MIN_TRADES_TO_ADOPT` (default `3`), and `MIN_FITNESS_IMPROVEMENT` (default `0.25`) — a required **margin over the parameters already in use**. The margin gate exists because a rolling-origin calibration over 311 (symbol, origin) pairs showed that absolute fitness does not predict a good forward outcome; the size of the improvement over the baseline does.
-   - The parameter search runs on its own timeframe (`OPTIMIZATION_TIMEFRAME`, default `1Hour`) with a long window (`OPTIMIZATION_LOOKBACK_DAYS`, default `400`). Alpaca serves only about 60 days of 15-minute bars, which produced 1–3 held-out trades — too few to ever clear a 3-trade gate, so the optimiser never adopted anything.
-   - The search is seeded (`OPTIMIZER_SEED`), so calibration is reproducible.
-   - Stores and updates optimal parameters per ticker in `strategy_state.json`.
-5. **Zero-Config Paper Simulator + Alpaca Cloud Integration**:
-   - Runs out-of-the-box with a built-in virtual **$100,000 Paper Simulator**, whose positions and cash are persisted across restarts.
-   - Seamlessly connects to **Alpaca Markets** (Paper or Live) simply by setting your API keys in `.env`.
-   - If credentials are present but Alpaca rejects them, the bot **refuses to start** rather than silently downgrading to the simulator. Set `ALLOW_SIMULATOR_FALLBACK=True` to override.
-6. **Telegram / Discord Notifications**:
-   - Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (or `DISCORD_WEBHOOK_URL`) in `.env` and the bot reports back.
-   - You get a message on every filled order and a **CRITICAL** one if the daily drawdown circuit breaker trips.
-   - You get an **end-of-session report** when the market closes: equity, daily P&L, every open position with its unrealised P&L, every trade taken and why, and a "worth knowing" section for anything that went wrong (a tripped breaker, an optimiser parameter change, or a session where nothing happened at all).
-   - The session report fires on the market-close transition, so a bot started after hours does not send a bogus report for a session it never observed.
-   - Send one on demand with `python bot.py --report`.
+It ships with a **$100,000 paper simulator** and runs with zero configuration. Add Alpaca keys when you want it to talk to a real account.
 
 ---
 
-## 🚀 Quick Start (One Command / One Click)
+## What makes it different
 
-### 1. Launch the Autonomous Bot
-Simply double-click **`start_bot.bat`** or run:
+Most trading bots fail in a way that *looks* like success: they trade nothing, they adopt bad parameters, or they look healthy while quietly leaking your account number into a git commit. This one is built around making each of those failures loud.
+
+### 1. Nothing fails silently
+
+| Failure | What this bot does |
+| :--- | :--- |
+| Alpaca rejects your credentials | **Refuses to start.** Falling back to the simulator would look operational while placing zero orders. Opt out explicitly with `ALLOW_SIMULATOR_FALLBACK=True`. |
+| The optimiser finds a candidate | It must clear an **absolute floor**, a **minimum trade count**, *and* a **margin over the parameters already in use**. A candidate that merely "beats the baseline" is not enough. |
+| A test run happens | `pytest.ini` scopes collection to `tests/`. A root-level script that executed the live trading loop at import time (submitting real orders on every `pytest` run) is guarded against by `tests/test_safety.py`. |
+| An output file contains your account number | A test scans every untracked file git would publish and fails if any contains an Alpaca account number. It checks the *content*, not a list of filenames. |
+
+The theme: **a bot that looks healthy while doing nothing is the worst possible failure mode**, because it costs you nothing and teaches you nothing.
+
+### 2. The optimiser is calibrated, not guessed
+
+A rolling-origin walk-forward over **311 (symbol, origin) pairs** across seven liquid symbols, with a third untouched forward slice measuring what actually happened after each adoption, produced two findings that shaped the gates:
+
+- **Absolute fitness does not predict success.** Candidates scoring above 3.0 did no better forward than the defaults. The `[-999, -0.5)` bucket actually performed best.
+- **The size of the improvement does.** Hence `MIN_FITNESS_IMPROVEMENT` — a required margin over the parameters currently in use.
+
+The gate calibration from that study:
+
+| Gate | Adoption rate | Mean forward P&L | % positive | vs. baseline |
+| :--- | :--- | :--- | :--- | :--- |
+| Never adopt (defaults) | — | +0.21% | 41% | — |
+| Fitness ≥ 0, trades ≥ 3 | 3% | **+1.50%** | **62%** | **+0.18%** |
+| Fitness ≥ 0, trades ≥ 2 | 14% | +0.76% | 51% | −0.25% |
+
+Loosening the trade gate raises the adoption rate but loses the edge. The shipped defaults sit at the row that worked.
+
+### 3. The search runs on its own timeframe
+
+Live signals use 15-minute bars. The parameter search uses **1-hour bars over 400 days**.
+
+This separation is not cosmetic. Alpaca serves only ~1,534 bars of 15-minute history (~83 days), which produced 1–3 held-out trades — a sample too small to distinguish a good parameter set from a bad one. The optimiser simply could not work, and no amount of gate-tuning fixed it. At 1-hour bars Alpaca serves ~2 years, yielding 20+ training trades and 8+ held-out trades. The parameters are all timeframe-agnostic ratios (EMA spans, RSI levels, ATR multiples), so they transfer to the live bar size and the ATR stop rescales itself.
+
+---
+
+## Features
+
+**Market regime detection** — classifies conditions into `TRENDING_BULL`, `TRENDING_BEAR`, `RANGING`, or `HIGH_VOLATILITY` from EMA structure, MACD, ATR percentile, and Bollinger width. Every downstream decision branches on the regime.
+
+**Asymmetric risk/reward strategy** — buys low-risk pullbacks in confirmed uptrends (EMA support test with an RSI dip and volume confirmation), and takes Bollinger mean reversion when the market is ranging. The reward-to-risk ratio is structural rather than filtered: the stop sits at 1.8× ATR and the target at `PROFIT_TARGET_RR` times that distance, so every entry is asymmetric by construction. In `HIGH_VOLATILITY` the strategy holds and preserves capital instead of entering.
+
+**Conviction ranking** — the watchlist is scanned and ranked, so a strong setup is never crowded out by a weak one competing for the last position slot.
+
+**Institutional risk management**
+- *Volatility sizing*: no trade risks more than 1.5% of equity, sized from Average True Range.
+- *Server-side bracket orders*: every entry attaches an OCO stop-loss and take-profit.
+- *Trailing stops* on positions that have run up, cancelling the old stop before submitting the replacement.
+- *Daily circuit breaker*: halts new entries when the day's drawdown hits 3%.
+
+**Self-improving optimizer** — walk-forward validation (70/30 split), the held-out slice scored exactly once on the training-phase winner, seeded for reproducibility, persisted per ticker in `strategy_state.json`.
+
+**Telegram / Discord notifications** — a message per filled order, a CRITICAL one if the breaker trips, and an **end-of-session report** when the market closes containing equity, daily P&L, every open position with its unrealised P&L, every trade and the reason for it, and a "worth knowing" section for anything that went wrong (tripped breaker, optimiser parameter change, or a session where nothing happened at all).
+
+> The session report fires on the market-close *transition*, so a bot started after hours does not send a bogus report for a session it never observed.
+
+**Zero-config paper simulator** — a $100,000 virtual account with positions and cash persisted across restarts, for running the bot before you trust it with money.
+
+---
+
+## Quick start
+
 ```bash
+git clone https://github.com/jbolex10-lab/trading-bot.git
+cd trading-bot
+```
+
+> This repository is private. GitHub no longer accepts account passwords for HTTPS clones, so authenticate with a [personal access token](https://github.com/settings/tokens) (`repo` scope) as the password, or use an SSH key.
+
+```bash
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
+
+pip install -r requirements.txt
+copy .env.example .env         # cp on macOS/Linux
+
 python bot.py
 ```
-**That is it!** When enabled, the bot automatically:
-1. Verifies your connection (Alpaca or safe local simulation).
-2. Checks if parameters need self-improvement calibration for today's market.
-3. Scans your watchlist constantly on autopilot.
-4. Places disciplined bracket orders (with automatic Stop-Loss & Take-Profit).
-5. Monitors open positions and manages trailing stops.
-6. Re-tunes parameters automatically every 24 hours in the background.
+
+That is it. The bot connects (or starts the simulator), checks whether parameters need calibration, then scans the watchlist on autopilot — placing bracket orders, managing trailing stops, and re-tuning parameters every 24 hours in the background.
+
+On Windows, `start_bot.bat` does the same thing in one double-click.
+
+### Going live
+
+1. Get [Alpaca paper trading keys](https://app.alpaca.markets) (free).
+2. Put them in `.env` and validate:
+   ```bash
+   python set_alpaca_keys.py --check     # validate existing keys
+   python set_alpaca_keys.py              # set new ones (input hidden)
+   ```
+3. Leave `ALPACA_LIVE=False` and let it run a full session on paper.
+4. Only then set `ALPACA_LIVE=True`.
 
 ---
 
-## 🛠️ Commands & Usage
+## Commands
 
-### 🔍 1. Market Scanner
-Scans your watchlist (`SPY, QQQ, AAPL, NVDA, MSFT, TSLA, AMD`), detects regimes, computes indicators, and checks for high-conviction setups:
-```bash
-python bot.py --scan
-```
-
-### 🧠 2. Self-Improvement Parameter Tuning
-Runs the walk-forward optimizer to tune parameters on recent market data:
-```bash
-# Optimize a single symbol
-python bot.py --optimize --symbol SPY
-
-# Optimize the entire watchlist
-python bot.py --optimize
-```
-
-### 📊 3. Backtest Analysis
-Generates an institutional quantitative performance report (Win Rate, Profit Factor, Sharpe Ratio, Max Drawdown):
-```bash
-python bot.py --backtest SPY
-```
-
-### 💼 4. Account & Portfolio Status
-Inspects account equity, available cash, buying power, and active open positions:
-```bash
-python bot.py --status
-```
-
-### 🔄 5. Live Automated Trading Loop
-Starts the automated loop (scans every 60s, manages trailing stops, executes setups, and runs daily self-improvement cycles):
-```bash
-python bot.py --run --interval 60
-```
+| Command | What it does |
+| :--- | :--- |
+| `python bot.py` | Start autonomous trading (market-hours aware) |
+| `python bot.py --run --interval 60` | Same, with an explicit scan interval in seconds |
+| `python bot.py --scan` | One scan of the watchlist, no trading loop |
+| `python bot.py --status` | Equity, cash, buying power, open positions |
+| `python bot.py --report` | Send the session report to Telegram/Discord now |
+| `python bot.py --optimize` | Run the walk-forward optimiser over the watchlist |
+| `python bot.py --optimize --symbol SPY` | Optimise a single symbol |
+| `python bot.py --backtest SPY` | Win rate, profit factor, Sharpe, max drawdown |
 
 ---
 
-## ⚙️ Configuration Parameters (`.env` or `config.py`)
+## Configuration
+
+Everything lives in `.env` (copy from `.env.example`). `config.py` validates it at startup and refuses to run on an invalid value.
 
 | Setting | Default | Description |
 | :--- | :--- | :--- |
-| `ALPACA_API_KEY` | - | Your Alpaca Paper/Live API Key |
-| `ALPACA_SECRET_KEY` | - | Your Alpaca Secret Key |
-| `ALPACA_LIVE` | `False` | `False` for Paper Trading, `True` for Live Real Money |
-| `ALLOW_SIMULATOR_FALLBACK` | `False` | Allow the bot to run on the simulator when Alpaca rejects your credentials |
-| `WATCHLIST` | `SPY,QQQ,AAPL,...` | Liquid stocks and ETFs to monitor |
-| `BAR_TIMEFRAME` | `15Min` | Bar timeframe for analysis (`1Min`, `5Min`, `15Min`, `1Hour`, `1Day`) |
-| `MAX_PORTFOLIO_RISK_PER_TRADE`| `0.015` (1.5%) | Max portfolio equity risked on any single trade |
-| `MAX_OPEN_POSITIONS` | `5` | Maximum concurrent positions allowed |
-| `DAILY_DRAWDOWN_LIMIT` | `0.03` (3%) | Daily loss limit to activate circuit breaker |
-| `PROFIT_TARGET_RR` | `2.0` | Target profit ratio (2.0x ATR risk) |
-| `OPTIMIZATION_TIMEFRAME` | `1Hour` | Timeframe the parameter search reads, independent of `BAR_TIMEFRAME` |
-| `OPTIMIZATION_LOOKBACK_DAYS` | `400` | Window of history used to tune parameters |
-| `MIN_FITNESS_TO_ADOPT` | `0.0` | Absolute out-of-sample fitness floor for adopting tuned parameters |
-| `MIN_TRADES_TO_ADOPT` | `3` | Minimum out-of-sample trades required to trust a tuned parameter set |
-| `MIN_FITNESS_IMPROVEMENT` | `0.25` | Required margin over the parameters already in use |
-| `OPTIMIZER_SEED` | `42` | Seed for the parameter search (makes calibration reproducible) |
-| `TELEGRAM_BOT_TOKEN` | - | Telegram bot token for order/session notifications |
-| `TELEGRAM_CHAT_ID` | - | Chat that receives the notifications |
-| `DISCORD_WEBHOOK_URL` | - | Discord webhook for order/session notifications |
-| `ENABLE_SESSION_REPORT` | `True` | Send the end-of-session report when the market closes |
+| `ALPACA_API_KEY` | – | Alpaca paper or live key |
+| `ALPACA_SECRET_KEY` | – | Alpaca secret key |
+| `ALPACA_LIVE` | `False` | `False` for paper, `True` for real money |
+| `ALLOW_SIMULATOR_FALLBACK` | `False` | Deliberately run on the simulator despite bad keys |
+| `WATCHLIST` | `SPY,QQQ,AAPL,NVDA,MSFT,TSLA,AMD` | Symbols to monitor |
+| `BAR_TIMEFRAME` | `15Min` | Bar size for live signals (`1Min`, `5Min`, `15Min`, `1Hour`, `1Day`) |
+| `MAX_PORTFOLIO_RISK_PER_TRADE` | `0.015` | Max equity risked on any single trade |
+| `MAX_OPEN_POSITIONS` | `5` | Maximum concurrent positions |
+| `DAILY_DRAWDOWN_LIMIT` | `0.03` | Daily loss that trips the circuit breaker |
+| `PROFIT_TARGET_RR` | `2.0` | Target reward-to-risk ratio |
+| `OPTIMIZATION_TIMEFRAME` | `1Hour` | Bar size the parameter search reads |
+| `OPTIMIZATION_LOOKBACK_DAYS` | `400` | History window used to tune parameters |
+| `MIN_FITNESS_TO_ADOPT` | `0.0` | Absolute out-of-sample fitness floor |
+| `MIN_TRADES_TO_ADOPT` | `3` | Minimum out-of-sample trades to trust a result |
+| `MIN_FITNESS_IMPROVEMENT` | `0.25` | Required margin over the parameters in use |
+| `OPTIMIZER_SEED` | `42` | Makes the search reproducible |
+| `TELEGRAM_BOT_TOKEN` | – | Telegram bot token for notifications |
+| `TELEGRAM_CHAT_ID` | – | Chat that receives them |
+| `DISCORD_WEBHOOK_URL` | – | Discord webhook for notifications |
+| `ENABLE_SESSION_REPORT` | `True` | Send the end-of-session report |
 
 ---
 
-## 📁 Project Structure
+## Project structure
 
 ```
-trading Ai/
-├── config.py                 # Configuration loader and environment manager
-├── bot.py                    # Master CLI orchestrator & rich dashboard
-├── requirements.txt          # Python dependencies
+trading-bot/
+├── config.py                 # Config loading and validation
+├── bot.py                    # CLI orchestrator and the live loop
 ├── pytest.ini                # Scopes test collection to tests/ only
-├── strategy_state.json       # Persisted self-improved parameters per ticker
+├── strategy_state.json       # Learned parameters per ticker
 ├── reset_strategy_state.py   # Clears unvalidated parameters (keeps a backup)
 ├── data/
-│   └── market_data.py        # Universal data provider (Alpaca + Yahoo Finance fallback)
+│   └── market_data.py        # OHLCV from Alpaca, yfinance fallback
 ├── indicators/
-│   └── technicals.py         # ATR, RSI, EMAs, MACD, Bollinger Bands, Regime Classifier
+│   └── technicals.py         # EMA/RSI/ATR/BB/MACD/VWAP + regime classifier
 ├── strategy/
-│   ├── adaptive_strategy.py  # Regime-aware entry/exit signal generator
+│   ├── adaptive_strategy.py  # Regime-aware signal generation
 │   └── scanner.py            # Conviction ranking across the watchlist
 ├── risk/
-│   └── risk_manager.py       # Volatility position sizing, circuit breakers, stops
+│   └── risk_manager.py       # Volatility sizing, circuit breaker, trailing stops
 ├── optimizer/
-│   ├── backtester.py         # Performance evaluation (Sharpe, Profit Factor, Drawdown)
-│   └── self_improver.py      # Walk-forward parameter optimizer
+│   ├── backtester.py         # Sharpe, profit factor, drawdown, fitness
+│   └── self_improver.py      # Walk-forward optimiser and adoption gates
 ├── execution/
-│   ├── alpaca_broker.py      # Alpaca trading client + local paper simulator
-│   └── webhook.py            # Discord / Telegram notifications
-└── tests/                    # pytest suite (safety, optimizer, live loop)
+│   ├── alpaca_broker.py      # Alpaca client + local paper simulator
+│   └── webhook.py            # Telegram / Discord notifications
+└── tests/                    # Safety, optimizer, risk, wiring, integration
 ```
+
+Each layer has exactly one owner. A change to what the bot buys belongs in `strategy/` and must be mirrored in `optimizer/backtester.py`, so the backtest and the live bot never disagree.
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
-python -m pytest              # runs the whole suite
-python -m pytest -v           # verbose
+python -m pytest                          # whole suite
+python -m pytest -v                       # verbose
 python -m pytest tests/test_optimizer_integrity.py
 ```
 
-Test collection is scoped to `tests/` via `pytest.ini`. This matters: an
-earlier version had a root-level `test_scan.py` that pytest *imported* on
-every run, which executed the live trading loop and submitted real Alpaca
-orders. `tests/test_safety.py` now guards against that recurring.
+The suite is hermetic: no network, no orders. That is enforced, not assumed — `tests/test_safety.py` collects the suite in a subprocess and fails if importing anything executes the trading loop.
 
 ---
 
-## 🔑 Credential Check
+## Notes and limitations
 
-```bash
-python set_alpaca_keys.py --check     # validate the keys in .env
-python set_alpaca_keys.py              # set new keys (input is hidden)
-```
-
-If the bot logs `BrokerAuthenticationError`, your keys were rejected. It will
-not silently trade on the simulator — set `ALLOW_SIMULATOR_FALLBACK=True` if
-that is what you want.
+- **Sharpe is computed from the daily equity curve**, resampled to daily closes and clipped to ±5, not from trade returns. Short windows produce unstable trade-level Sharpe.
+- **The paper simulator is a learning tool, not a backtest.** It models orders and positions; it does not model slippage, partial fills, or borrow costs. Treat its numbers as directional.
+- **The calibration study covers seven liquid symbols over roughly two years.** The gates are calibrated for that regime and would need re-running before being trusted on a different universe or timeframe.
+- **`strategy_state.json` is tracked in git** because it is the bot's learned memory. Runtime output files that embed your account number are ignored and guarded by a test.
