@@ -58,6 +58,11 @@ class Config:
     ENABLE_SELF_IMPROVEMENT: bool = os.getenv("ENABLE_SELF_IMPROVEMENT", "True").lower() in ("true", "1", "yes")
     OPTIMIZATION_INTERVAL_HOURS: int = int(os.getenv("OPTIMIZATION_INTERVAL_HOURS", "24"))
 
+    # End-of-session reporting. The report is sent on the market-close
+    # transition, so it fires once per trading session rather than once
+    # per scan.
+    ENABLE_SESSION_REPORT: bool = os.getenv("ENABLE_SESSION_REPORT", "True").lower() in ("true", "1", "yes")
+
     # The timeframe and window used to TUNE the strategy.
     #
     # These are deliberately separate from BAR_TIMEFRAME. Alpaca caps

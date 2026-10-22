@@ -50,6 +50,18 @@ console = Console(highlight=False)
 class TradingBotOrchestrator:
     """Master orchestrator integrating data, strategy, risk, optimizer, and execution."""
 
+    # --- Session reporting state -------------------------------------
+    # Declared at class level with None sentinels so the attributes always
+    # exist, even on an instance built without __init__ (the test suite
+    # does this to avoid touching the network). _ensure_session_state()
+    # rebinds them per instance, so the lists are never shared between
+    # instances.
+    _session_trades = None
+    _session_warnings = None
+    _session_scans = 0
+    _was_market_open = False
+    _report_sent_for_date = None
+
     def __init__(self):
         Config.assert_valid()
         self.market_data = MarketDataProvider()
@@ -61,6 +73,28 @@ class TradingBotOrchestrator:
         # Initialize start of day equity
         acc = self.broker.get_account_summary()
         self.risk_mgr.update_start_of_day_equity(acc['equity'])
+
+        # --- Session reporting state -------------------------------------
+        # The operator wants one report per trading session, not one per
+        # scan. These track what happened during the current session so the
+        # end-of-day report can say something useful instead of just a
+        # P&L number.
+        self._ensure_session_state()
+
+    def _ensure_session_state(self):
+        """Initialises the per-instance session tracking containers.
+
+        Called from __init__ and defensively from the accessors, so an
+        instance built without __init__ (the test suite does this to avoid
+        touching the network) still works. The lists are per-instance, so
+        two orchestrators never share state.
+        """
+        if getattr(self, "_session_trades", None) is None:
+            self._session_trades = []
+        if getattr(self, "_session_warnings", None) is None:
+            self._session_warnings = []
+        if getattr(self, "_session_scans", None) is None:
+            self._session_scans = 0
 
     def print_dashboard_status(self):
         """Displays rich terminal dashboard of portfolio status and open trades."""
@@ -104,11 +138,21 @@ class TradingBotOrchestrator:
         else:
             console.print("[dim]No active open positions. Scanning for setups...[/dim]\n")
 
-    def _notify_order(self, side: str, symbol: str, qty: int, price: float):
+    def _notify_order(self, side: str, symbol: str, qty: int, price: float, reason: str = ""):
         """Sends a trade notification. Never allowed to break the trading loop."""
         notifier = getattr(self, "notifier", None)
         if notifier is None:
             return
+        # Record it for the session report first. The report must include
+        # every trade even if the webhook itself fails.
+        self._ensure_session_state()
+        self._session_trades.append({
+            "side": side,
+            "symbol": symbol,
+            "qty": qty,
+            "price": price,
+            "reason": reason,
+        })
         try:
             notifier.notify_order_execution(symbol, side, qty, price)
         except Exception as e:
@@ -119,6 +163,11 @@ class TradingBotOrchestrator:
         notifier = getattr(self, "notifier", None)
         if notifier is None:
             return
+        self._ensure_session_state()
+        self._session_warnings.append(
+            f"Circuit breaker tripped ({symbol}): {reason}" if symbol
+            else f"Circuit breaker tripped: {reason}"
+        )
         try:
             equity = self.broker.get_account_summary().get("equity", 0.0)
             start = getattr(self.risk_mgr, "start_of_day_equity", None) or equity
@@ -126,6 +175,69 @@ class TradingBotOrchestrator:
             notifier.notify_circuit_breaker(reason, drawdown)
         except Exception as e:
             logger.warning(f"Could not send circuit breaker notification: {e}")
+
+    def _record_session_warning(self, warning: str):
+        """Records something worth telling the operator in the session report."""
+        self._ensure_session_state()
+        if warning and warning not in self._session_warnings:
+            self._session_warnings.append(warning)
+
+    def _build_session_report(self) -> Dict[str, Any]:
+        """Assembles the end-of-session report from live state.
+
+        Never raises. A reporting failure must not take down the bot.
+        """
+        try:
+            acc = self.broker.get_account_summary()
+            equity = float(acc.get("equity", 0.0))
+            mode = acc.get("mode", "")
+            positions = list(self.broker.get_open_positions().values())
+
+            start = getattr(self.risk_mgr, "start_of_day_equity", None)
+            if not start:
+                start = equity
+            daily_pnl = equity - float(start)
+            daily_pnl_pct = (daily_pnl / float(start) * 100.0) if start else 0.0
+
+            warnings = list(self._session_warnings)
+            if not self._session_trades and not positions:
+                warnings.append(
+                    "No trades and no positions. If you expected activity, "
+                    "the optimiser may be rejecting every candidate."
+                )
+            if self._session_scans == 0:
+                warnings.append("No market scans completed this session.")
+
+            return {
+                "equity": equity,
+                "daily_pnl": daily_pnl,
+                "daily_pnl_pct": daily_pnl_pct,
+                "positions": positions,
+                "trades_taken": list(self._session_trades),
+                "warnings": warnings,
+                "mode": mode,
+                "scans": self._session_scans,
+            }
+        except Exception as e:
+            logger.warning(f"Could not build session report: {e}")
+            return {}
+
+    def _send_session_report(self):
+        """Sends the end-of-session report. Never allowed to break the loop."""
+        notifier = getattr(self, "notifier", None)
+        if notifier is None:
+            return
+        if not Config.ENABLE_SESSION_REPORT:
+            logger.info("Session report disabled by configuration.")
+            return
+        try:
+            report = self._build_session_report()
+            if not report:
+                return
+            notifier.notify_session_report(report)
+            logger.info("Session report sent.")
+        except Exception as e:
+            logger.warning(f"Could not send session report: {e}")
 
     def scan_and_trade(self) -> list[TradeSignal]:
         """
@@ -254,7 +366,7 @@ class TradingBotOrchestrator:
                     )
                     if order_res.success:
                         console.print(f"   ✅ [bold green]{order_res.message}[/bold green]")
-                        self._notify_order("BUY", sym, size_res.shares, signal.entry_price)
+                        self._notify_order("BUY", sym, size_res.shares, signal.entry_price, signal.reason)
                     else:
                         console.print(f"   ❌ [bold red]Order failed: {order_res.message}[/bold red]")
                 else:
@@ -284,7 +396,7 @@ class TradingBotOrchestrator:
                 )
                 if close_res.success:
                     console.print(f"   ✅ [bold green]{close_res.message}[/bold green]")
-                    self._notify_order("SELL", sym, qty, position.get("current_price", 0.0))
+                    self._notify_order("SELL", sym, qty, position.get("current_price", 0.0), signal.reason)
                 else:
                     console.print(f"   ❌ [bold red]Close failed: {close_res.message}[/bold red]")
 
@@ -394,6 +506,16 @@ class TradingBotOrchestrator:
                 param_summary
             )
 
+            # If the optimiser changed the strategy under the operator's
+            # feet, that belongs in the session report. Adopting new
+            # parameters changes what the bot will do tomorrow, so it is
+            # not something to bury in a log file.
+            if improved:
+                self._record_session_warning(
+                    f"Optimiser adopted new parameters for {sym} "
+                    f"(fitness {res.get('fitness_margin', 0):+.2f} vs baseline)."
+                )
+
         console.print(opt_table)
         console.print("[green]✅ Strategy parameters successfully updated and saved to strategy_state.json[/green]\n")
 
@@ -455,6 +577,28 @@ class TradingBotOrchestrator:
                 # ── Market Hours Check ──────────────────────────────
                 clock = self.broker.get_market_clock()
                 is_open = clock.get("is_open", False)
+
+                # ── Session Close Detection ─────────────────────────
+                # The report fires on the open -> closed TRANSITION. This
+                # matters: the bot may be started after the market is
+                # already shut, or restarted mid-session, and neither
+                # should produce a report for a session the bot did not
+                # actually observe.
+                if is_open:
+                    self._was_market_open = True
+                elif self._was_market_open:
+                    # The market just closed. Send the report for the
+                    # session that just ended, then reset the session
+                    # state so tomorrow starts clean.
+                    self._was_market_open = False
+                    today_et = datetime.now(timezone.utc).date()
+                    if self._report_sent_for_date != today_et:
+                        self._report_sent_for_date = today_et
+                        console.print("\n[bold cyan]📬 Market closed. Sending session report...[/bold cyan]")
+                        self._send_session_report()
+                        self._session_trades.clear()
+                        self._session_warnings.clear()
+                        self._session_scans = 0
 
                 if not is_open:
                     next_open = clock.get("next_open")
@@ -534,6 +678,7 @@ class TradingBotOrchestrator:
 
                 # ── Active Trading Cycle ────────────────────────────
                 cycle_count += 1
+                self._session_scans += 1
                 console.print(f"\n[bold blue]─── Autopilot Cycle #{cycle_count} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ───[/bold blue]")
                 self.print_dashboard_status()
                 self.scan_and_trade()
@@ -559,6 +704,7 @@ def main():
     parser.add_argument("--symbol", type=str, help="Target specific symbol for optimization (optional)")
     parser.add_argument("--backtest", type=str, help="Run backtest analysis on a specific symbol (e.g., SPY, AAPL)")
     parser.add_argument("--status", action="store_true", help="Show current account equity, open positions, and state only")
+    parser.add_argument("--report", action="store_true", help="Send the session report to Telegram/Discord now and exit")
     parser.add_argument("--run", action="store_true", help="Start autonomous trading (market-hours aware)")
     parser.add_argument("--interval", type=int, default=60, help="Scan interval in seconds (default: 60)")
 
@@ -571,6 +717,8 @@ def main():
         bot.run_backtest_symbol(args.backtest.upper())
     elif args.status:
         bot.print_dashboard_status()
+    elif args.report:
+        bot._send_session_report()
     elif args.scan:
         bot.print_dashboard_status()
         bot.scan_and_trade()

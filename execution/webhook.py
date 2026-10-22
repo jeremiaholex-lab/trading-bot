@@ -1,5 +1,6 @@
 import os
 import logging
+import html
 import requests
 from typing import Optional, Dict, Any
 
@@ -71,11 +72,14 @@ class WebhookNotifier:
     def _send_telegram(self, title: str, message: str, fields: Optional[Dict[Any, Any]] = None):
         try:
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            text_lines = [f"<b>{title}</b>", "", message]
+            # The message body carries its own intentional HTML (bold labels,
+            # italics), so it is NOT escaped here. Field values are plain
+            # data and are escaped.
+            text_lines = [f"<b>{html.escape(title)}</b>", "", message]
             if fields:
                 text_lines.append("")
                 for k, v in fields.items():
-                    text_lines.append(f"<b>{k}:</b> {v}")
+                    text_lines.append(f"<b>{html.escape(str(k))}:</b> {html.escape(str(v))}")
             
             payload = {
                 "chat_id": self.telegram_chat_id,
@@ -111,3 +115,87 @@ class WebhookNotifier:
         }
         level = "SUCCESS" if daily_pnl >= 0 else "WARNING"
         self.send_alert(title, msg, level=level, fields=fields)
+
+    def notify_session_report(self, report: Dict[str, Any]):
+        """Sends the end-of-session report.
+
+        A report the operator can act on, not just a P&L number. The body
+        answers the questions you actually have at 4 PM: what did the day
+        make me, what is still open, did anything break, and did the
+        optimiser change the strategy under me.
+
+        Telegram renders the body as HTML, so the body carries the detail
+        (positions, trades, warnings) and the fields carry the headline
+        numbers that sit next to the message.
+        """
+        equity = float(report.get("equity", 0.0))
+        daily_pnl = float(report.get("daily_pnl", 0.0))
+        daily_pnl_pct = float(report.get("daily_pnl_pct", 0.0))
+        positions = report.get("positions") or []
+        trades = report.get("trades_taken") or []
+        warnings = report.get("warnings") or []
+        mode = report.get("mode", "")
+
+        pnl_sign = "+" if daily_pnl >= 0 else ""
+        pct_sign = "+" if daily_pnl_pct >= 0 else ""
+
+        lines = []
+        if mode:
+            lines.append(f"<b>Mode:</b> {mode}")
+
+        if positions:
+            lines.append("")
+            lines.append("<b>Open positions</b>")
+            for p in positions:
+                pl = float(p.get("unrealized_pl", 0.0))
+                plpc = float(p.get("unrealized_plpc", 0.0))
+                pl_sign = "+" if pl >= 0 else ""
+                pct = f"{plpc:+.2f}%"
+                lines.append(
+                    f"  • {html.escape(str(p.get('symbol')))} {p.get('qty', 0)} @ "
+                    f"${float(p.get('current_price', 0.0)):,.2f} "
+                    f"({pl_sign}${pl:,.2f}, {pct})"
+                )
+        else:
+            lines.append("")
+            lines.append("<i>No open positions.</i>")
+
+        if trades:
+            lines.append("")
+            lines.append("<b>Trades this session</b>")
+            for t in trades:
+                side = html.escape(str(t.get("side", "?")))
+                reason = html.escape(str(t.get("reason", "")))
+                lines.append(
+                    f"  • {side} {html.escape(str(t.get('symbol')))} — {t.get('qty', 0)} @ "
+                    f"${float(t.get('price', 0.0)):,.2f} — <i>{reason}</i>"
+                )
+        else:
+            lines.append("")
+            lines.append("<i>No trades executed this session.</i>")
+
+        if warnings:
+            lines.append("")
+            lines.append("<b>Worth knowing</b>")
+            for w in warnings:
+                lines.append(f"  • {html.escape(str(w))}")
+
+        body = "\n".join(lines)
+
+        fields = {
+            "Equity": f"${equity:,.2f}",
+            "Daily P&L": f"{pnl_sign}${daily_pnl:,.2f} ({pct_sign}{daily_pnl_pct:.2f}%)",
+            "Open Positions": len(positions),
+            "Trades": len(trades),
+        }
+        if warnings:
+            fields["Warnings"] = len(warnings)
+
+        level = "SUCCESS" if daily_pnl >= 0 and not warnings else "WARNING"
+        self.send_alert(
+            "Session Report",
+            body,
+            level=level,
+            fields=fields,
+        )
+

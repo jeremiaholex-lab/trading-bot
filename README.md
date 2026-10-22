@@ -28,6 +28,12 @@ An institutional-grade, self-improving quantitative trading bot designed for US 
    - Runs out-of-the-box with a built-in virtual **$100,000 Paper Simulator**, whose positions and cash are persisted across restarts.
    - Seamlessly connects to **Alpaca Markets** (Paper or Live) simply by setting your API keys in `.env`.
    - If credentials are present but Alpaca rejects them, the bot **refuses to start** rather than silently downgrading to the simulator. Set `ALLOW_SIMULATOR_FALLBACK=True` to override.
+6. **Telegram / Discord Notifications**:
+   - Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (or `DISCORD_WEBHOOK_URL`) in `.env` and the bot reports back.
+   - You get a message on every filled order and a **CRITICAL** one if the daily drawdown circuit breaker trips.
+   - You get an **end-of-session report** when the market closes: equity, daily P&L, every open position with its unrealised P&L, every trade taken and why, and a "worth knowing" section for anything that went wrong (a tripped breaker, an optimiser parameter change, or a session where nothing happened at all).
+   - The session report fires on the market-close transition, so a bot started after hours does not send a bogus report for a session it never observed.
+   - Send one on demand with `python bot.py --report`.
 
 ---
 
@@ -106,6 +112,10 @@ python bot.py --run --interval 60
 | `MIN_TRADES_TO_ADOPT` | `3` | Minimum out-of-sample trades required to trust a tuned parameter set |
 | `MIN_FITNESS_IMPROVEMENT` | `0.25` | Required margin over the parameters already in use |
 | `OPTIMIZER_SEED` | `42` | Seed for the parameter search (makes calibration reproducible) |
+| `TELEGRAM_BOT_TOKEN` | - | Telegram bot token for order/session notifications |
+| `TELEGRAM_CHAT_ID` | - | Chat that receives the notifications |
+| `DISCORD_WEBHOOK_URL` | - | Discord webhook for order/session notifications |
+| `ENABLE_SESSION_REPORT` | `True` | Send the end-of-session report when the market closes |
 
 ---
 
