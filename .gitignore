@@ -39,3 +39,7 @@ simulator_state.tmp
 # Strategy state backups
 strategy_state_backup_*.json
 strategy_state.json.pre_fix_backup
+
+# Liveness heartbeat written by the live loop. Runtime state, not source.
+bot_heartbeat.json
+bot_heartbeat.tmp

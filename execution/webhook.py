@@ -116,6 +116,71 @@ class WebhookNotifier:
         level = "SUCCESS" if daily_pnl >= 0 else "WARNING"
         self.send_alert(title, msg, level=level, fields=fields)
 
+    def notify_bot_status(self, status: Dict[str, Any]):
+        """Sends a snapshot of what the bot is doing right now.
+
+        Distinct from the session report: this is "what is happening at
+        this moment", not "what happened today". It is what you check on
+        when you want to know the bot is alive and healthy without waiting
+        for the close.
+        """
+        equity = float(status.get("equity", 0.0))
+        last_equity = float(status.get("last_equity", 0.0))
+        daily_pnl = float(status.get("daily_pnl", 0.0))
+        daily_pnl_pct = float(status.get("daily_pnl_pct", 0.0))
+        positions = status.get("positions") or []
+        mode = status.get("mode", "")
+        market_state = status.get("market_state", "")
+        last_scan = status.get("last_scan_at", "")
+        scans = status.get("scans", 0)
+
+        pnl_sign = "+" if daily_pnl >= 0 else ""
+        pct_sign = "+" if daily_pnl_pct >= 0 else ""
+
+        lines = []
+        if mode:
+            lines.append(f"<b>Mode:</b> {html.escape(str(mode))}")
+        if market_state:
+            lines.append(f"<b>Market:</b> {html.escape(str(market_state))}")
+        if scans:
+            lines.append(f"<b>Scans today:</b> {scans}")
+        if last_scan:
+            lines.append(f"<b>Last scan:</b> {html.escape(str(last_scan))}")
+
+        if positions:
+            lines.append("")
+            lines.append("<b>Open positions</b>")
+            for p in positions:
+                pl = float(p.get("unrealized_pl", 0.0))
+                plpc = float(p.get("unrealized_plpc", 0.0))
+                pl_sign = "+" if pl >= 0 else ""
+                lines.append(
+                    f"  • {html.escape(str(p.get('symbol')))} {p.get('qty', 0)} @ "
+                    f"${float(p.get('current_price', 0.0)):,.2f} "
+                    f"({pl_sign}${pl:,.2f}, {plpc:+.2f}%)"
+                )
+        else:
+            lines.append("")
+            lines.append("<i>No open positions.</i>")
+
+        warnings = status.get("warnings") or []
+        if warnings:
+            lines.append("")
+            lines.append("<b>Worth knowing</b>")
+            for w in warnings:
+                lines.append(f"  • {html.escape(str(w))}")
+
+        body = "\n".join(lines)
+        fields = {
+            "Equity": f"${equity:,.2f}",
+            "Daily P&L": f"{pnl_sign}${daily_pnl:,.2f} ({pct_sign}{daily_pnl_pct:.2f}%)",
+            "Open Positions": len(positions),
+        }
+        if last_equity:
+            fields["Prev Close"] = f"${last_equity:,.2f}"
+
+        self.send_alert("Bot Status", body, level="INFO", fields=fields)
+
     def notify_session_report(self, report: Dict[str, Any]):
         """Sends the end-of-session report.
 

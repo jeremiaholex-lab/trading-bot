@@ -30,6 +30,7 @@ class _FakeAlpacaClient:
     def __init__(self, fail_without_cancel=False):
         self.cancelled = []
         self.submitted = []
+        self.replaced = []
         self.fail_without_cancel = fail_without_cancel
         self.open_orders = []
         self.positions = []
@@ -62,6 +63,12 @@ class _FakeAlpacaClient:
                 '(requested: 13, available: 0)","held_for_orders":"13"}'
             )
         self.submitted.append(request)
+        return _FakeOrder()
+
+    def replace_order_by_id(self, order_id, order_data):
+        """Atomic stop replacement. The real API PATCHes the order, so
+        the shares are never released between cancel and resubmit."""
+        self.replaced.append((str(order_id), order_data))
         return _FakeOrder()
 
 
@@ -128,8 +135,16 @@ def test_close_order_reports_failure_without_raising(monkeypatch):
     assert "rejected" in result.message.lower()
 
 
-def test_trailing_stop_cancels_the_old_stop_before_replacing_it(monkeypatch):
-    """Moving a stop must cancel the existing stop order first."""
+def test_trailing_stop_replaces_the_old_stop_atomically(monkeypatch):
+    """Moving a stop must REPLACE the existing stop order, not cancel it.
+
+    The previous implementation cancelled the stop and then submitted a
+    replacement. That opened a window with no protection at all, and the
+    replacement was then rejected with "insufficient qty available"
+    because the cancelled order's shares were still held -- leaving a
+    profitable position permanently bare. `replace_order_by_id` PATCHes
+    the order in place, so the shares are never released.
+    """
     from alpaca.trading.enums import OrderStatus, OrderType, OrderSide
 
     class _StopOrder:
@@ -140,6 +155,8 @@ def test_trailing_stop_cancels_the_old_stop_before_replacing_it(monkeypatch):
             self.type = OrderType.STOP
             self.side = OrderSide.SELL
             self.qty = 10
+            self.stop_price = 95.0
+            self.limit_price = None
 
     client = _FakeAlpacaClient()
     client.open_orders = [_StopOrder("old-stop-1")]
@@ -158,11 +175,16 @@ def test_trailing_stop_cancels_the_old_stop_before_replacing_it(monkeypatch):
     ok = broker.update_trailing_stop("NVDA", 115.0)
 
     assert ok is True
-    assert "old-stop-1" in client.cancelled, (
-        "the previous stop order was not cancelled before the replacement was "
-        "submitted; Alpaca would reject the new stop as a duplicate"
+    assert client.replaced, (
+        "the stop was not replaced in place; cancel-then-resubmit leaves the "
+        "position unprotected and the replacement is rejected as a duplicate"
     )
-    assert len(client.submitted) == 1
+    assert client.replaced[0][0] == "old-stop-1"
+    assert "old-stop-1" not in client.cancelled, (
+        "the existing stop was cancelled before the replacement was submitted, "
+        "creating a window with no protection at all"
+    )
+    assert len(client.submitted) == 0
 
 
 def test_simulator_close_removes_the_position(tmp_path):
@@ -258,10 +280,12 @@ def test_trailing_stop_keeps_the_take_profit_alive(monkeypatch):
     ok = broker.update_trailing_stop("NVDA", 115.0)
 
     assert ok is True
-    assert "stop-1" in client.cancelled
-    assert "tp-1" not in client.cancelled, (
-        "the take-profit order was cancelled while trailing the stop; the "
-        "position would be left with no profit target"
+    assert client.replaced and client.replaced[0][0] == "stop-1", (
+        "the stop order was not replaced in place"
+    )
+    assert not client.cancelled, (
+        "any cancellation while trailing opens a window with no protection; "
+        "the take-profit would be lost along with the stop"
     )
 
 

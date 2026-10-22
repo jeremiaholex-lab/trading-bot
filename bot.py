@@ -1,4 +1,6 @@
 import sys
+import os
+import json
 import time
 import argparse
 import logging
@@ -80,6 +82,16 @@ class TradingBotOrchestrator:
         # end-of-day report can say something useful instead of just a
         # P&L number.
         self._ensure_session_state()
+
+        # --- Liveness heartbeat -----------------------------------------
+        # The live loop writes this file on every cycle. A separate
+        # `bot.py --status-telegram` process reads it so the status
+        # message reflects the RUNNING bot rather than a newly spawned
+        # one with an empty session.
+        self._heartbeat_path = Config.BASE_DIR / "bot_heartbeat.json"
+        self._cycle_count = 0
+        self._market_open = False
+        self._started_at = datetime.now(timezone.utc).isoformat()
 
     def _ensure_session_state(self):
         """Initialises the per-instance session tracking containers.
@@ -222,6 +234,123 @@ class TradingBotOrchestrator:
             logger.warning(f"Could not build session report: {e}")
             return {}
 
+    def _write_heartbeat(self):
+        """Records what the live loop is doing, so another process can tell.
+
+        The running bot holds its session state in memory. A separate
+        `bot.py --status-telegram` process cannot see it. The heartbeat
+        file bridges that gap: the live loop writes it on every cycle, and
+        the status command reads it to report scan count and liveness.
+
+        Writes are atomic so a reader never sees a half-written file.
+        """
+        try:
+            heartbeat = {
+                "pid": os.getpid(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "scans": self._session_scans,
+                "cycles": self._cycle_count,
+                "last_scan_at": datetime.now(timezone.utc).isoformat(),
+                "session_trades": len(self._session_trades),
+                "warnings": list(self._session_warnings),
+                "market_state": "OPEN" if self._market_open else "CLOSED",
+                "started_at": self._started_at,
+            }
+            tmp = self._heartbeat_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(heartbeat, indent=2), encoding="utf-8")
+            tmp.replace(self._heartbeat_path)
+        except Exception as e:
+            logger.warning(f"Could not write heartbeat: {e}")
+
+    def _read_heartbeat(self) -> Dict[str, Any]:
+        """Reads the live loop's heartbeat, if there is a fresh one."""
+        try:
+            path = getattr(self, "_heartbeat_path", None)
+            if not path or not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            updated = data.get("updated_at", "")
+            if updated:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(updated)).total_seconds()
+                data["_age_seconds"] = age
+            return data
+        except Exception:
+            return {}
+
+    def _build_bot_status(self) -> Dict[str, Any]:
+        """Assembles a live snapshot of what the bot is doing right now.
+
+        Never raises. A status check must not be able to break anything.
+        """
+        try:
+            acc = self.broker.get_account_summary()
+            equity = float(acc.get("equity", 0.0))
+            last_equity = float(acc.get("last_equity", 0.0) or 0.0)
+            positions = list(self.broker.get_open_positions().values())
+
+            daily_pnl = equity - last_equity if last_equity else 0.0
+            daily_pnl_pct = (daily_pnl / last_equity * 100.0) if last_equity else 0.0
+
+            market_state = "unknown"
+            try:
+                clock = self.broker.get_market_clock()
+                market_state = "OPEN" if clock.get("is_open") else "CLOSED"
+            except Exception:
+                pass
+
+            # Prefer the live loop's own heartbeat over this process's
+            # view, so the report reflects the RUNNING bot rather than a
+            # freshly spawned one.
+            heartbeat = self._read_heartbeat()
+            scans = heartbeat.get("scans", getattr(self, "_session_scans", 0))
+            last_scan = ""
+            if heartbeat.get("last_scan_at"):
+                try:
+                    last_scan = datetime.fromisoformat(
+                        heartbeat["last_scan_at"]
+                    ).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    last_scan = heartbeat["last_scan_at"]
+                age = heartbeat.get("_age_seconds")
+                if age is not None:
+                    if age > 300:
+                        last_scan += f" (stale — {int(age)}s ago)"
+                    else:
+                        last_scan += " (live)"
+
+            warnings = list(heartbeat.get("warnings") or [])
+
+            return {
+                "equity": equity,
+                "last_equity": last_equity,
+                "daily_pnl": daily_pnl,
+                "daily_pnl_pct": daily_pnl_pct,
+                "positions": positions,
+                "mode": acc.get("mode", ""),
+                "market_state": market_state,
+                "scans": scans,
+                "last_scan_at": last_scan,
+                "warnings": warnings,
+                "heartbeat": heartbeat,
+            }
+        except Exception as e:
+            logger.warning(f"Could not build bot status: {e}")
+            return {}
+
+    def _send_bot_status(self):
+        """Sends the current-state snapshot. Never allowed to break the loop."""
+        notifier = getattr(self, "notifier", None)
+        if notifier is None:
+            return
+        try:
+            status = self._build_bot_status()
+            if not status:
+                return
+            notifier.notify_bot_status(status)
+            logger.info("Bot status sent.")
+        except Exception as e:
+            logger.warning(f"Could not send bot status: {e}")
+
     def _send_session_report(self):
         """Sends the end-of-session report. Never allowed to break the loop."""
         notifier = getattr(self, "notifier", None)
@@ -247,6 +376,21 @@ class TradingBotOrchestrator:
         console.print(f"\n[bold magenta]🔍 Scanning Watchlist ({', '.join(Config.WATCHLIST)})...[/bold magenta]")
         signals = []
         price_map = {}
+
+        # --- Protective order audit -------------------------------------
+        # Runs BEFORE anything else. A position with no stop-loss is
+        # unprotected, and nothing else in the bot would notice: it still
+        # shows in the dashboard, still counts toward MAX_OPEN_POSITIONS,
+        # and still reports a plausible P&L. This is the one failure that
+        # can cost real money with no visible symptom.
+        try:
+            problems = self.broker.ensure_protective_orders()
+            for sym, issues in (problems or {}).items():
+                for issue in issues:
+                    self._record_session_warning(f"{sym}: {issue}")
+                    console.print(f"[bold red]🛡️ {sym}: {issue}[/bold red]")
+        except Exception as e:
+            logger.warning(f"Protective order audit failed: {e}")
 
         scan_table = Table(title="📈 Market Scanner & Quantitative Edge Analysis")
         scan_table.add_column("Symbol", style="bold cyan")
@@ -586,11 +730,14 @@ class TradingBotOrchestrator:
                 # actually observe.
                 if is_open:
                     self._was_market_open = True
+                    self._market_open = True
                 elif self._was_market_open:
                     # The market just closed. Send the report for the
                     # session that just ended, then reset the session
                     # state so tomorrow starts clean.
                     self._was_market_open = False
+                    self._market_open = False
+                    self._write_heartbeat()
                     today_et = datetime.now(timezone.utc).date()
                     if self._report_sent_for_date != today_et:
                         self._report_sent_for_date = today_et
@@ -679,9 +826,12 @@ class TradingBotOrchestrator:
                 # ── Active Trading Cycle ────────────────────────────
                 cycle_count += 1
                 self._session_scans += 1
+                self._cycle_count = cycle_count
+                self._market_open = True
                 console.print(f"\n[bold blue]─── Autopilot Cycle #{cycle_count} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ───[/bold blue]")
                 self.print_dashboard_status()
                 self.scan_and_trade()
+                self._write_heartbeat()
 
                 # Periodic background self-improvement during the session
                 if Config.ENABLE_SELF_IMPROVEMENT and (time.time() - last_opt_time) >= opt_interval_seconds:
@@ -704,6 +854,8 @@ def main():
     parser.add_argument("--symbol", type=str, help="Target specific symbol for optimization (optional)")
     parser.add_argument("--backtest", type=str, help="Run backtest analysis on a specific symbol (e.g., SPY, AAPL)")
     parser.add_argument("--status", action="store_true", help="Show current account equity, open positions, and state only")
+    parser.add_argument("--status-telegram", action="store_true",
+                        help="Send a live status snapshot (equity, daily P&L, positions, liveness) to Telegram/Discord and exit")
     parser.add_argument("--report", action="store_true", help="Send the session report to Telegram/Discord now and exit")
     parser.add_argument("--run", action="store_true", help="Start autonomous trading (market-hours aware)")
     parser.add_argument("--interval", type=int, default=60, help="Scan interval in seconds (default: 60)")
@@ -717,6 +869,8 @@ def main():
         bot.run_backtest_symbol(args.backtest.upper())
     elif args.status:
         bot.print_dashboard_status()
+    elif args.status_telegram:
+        bot._send_bot_status()
     elif args.report:
         bot._send_session_report()
     elif args.scan:

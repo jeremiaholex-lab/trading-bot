@@ -99,6 +99,11 @@ class AlpacaBroker:
         self.sim_cash = 100000.0
         self.sim_positions: Dict[str, SimulatedPosition] = {}
         self.order_counter = 1
+        # Equity at the previous session's close. For the simulator this
+        # is simply the starting balance until a real session close is
+        # recorded, so daily P&L reads as zero rather than as a fabricated
+        # number.
+        self.sim_last_equity = 100000.0
 
         # The simulator's state is persisted so a restart does not silently
         # wipe open positions. Previously cash and positions lived only in
@@ -296,6 +301,12 @@ class AlpacaBroker:
                     "equity": float(acc.equity),
                     "cash": float(acc.cash),
                     "buying_power": float(acc.buying_power),
+                    # Alpaca's last_equity is the equity at the previous
+                    # session's close. It is the only correct denominator
+                    # for "what did today make me" -- the bot's own
+                    # start-of-day snapshot can drift if the process
+                    # restarts mid-session.
+                    "last_equity": float(getattr(acc, "last_equity", 0.0) or 0.0),
                     "mode": "LIVE REAL MONEY" if Config.ALPACA_LIVE else "ALPACA PAPER CLOUD",
                     "currency": acc.currency
                 }
@@ -309,6 +320,7 @@ class AlpacaBroker:
             "equity": round(equity, 2),
             "cash": round(self.sim_cash, 2),
             "buying_power": round(self.sim_cash * 2, 2), # 2x leverage
+            "last_equity": round(self.sim_last_equity or equity, 2),
             "mode": "LOCAL PAPER SIMULATOR (SAFE)",
             "currency": "USD"
         }
@@ -332,11 +344,17 @@ class AlpacaBroker:
         try:
             from alpaca.trading.requests import GetOrdersRequest
 
+            # status="all" because Alpaca's "open" filter hides HELD
+            # orders, and a bracket stop-loss is HELD while the position
+            # is open. Querying "open" here returned only the take-profit,
+            # so the trailing-stop logic never saw the live stop price and
+            # skipped every position.
             orders = self.client.get_orders(
-                GetOrdersRequest(status="open", limit=100)
+                GetOrdersRequest(status="all", limit=500)
             )
+            orders = [o for o in (orders or []) if self._is_live_order(o)]
         except Exception as e:
-            logger.warning(f"Could not read open orders for protective prices: {e}")
+            logger.warning(f"Could not read working orders for protective prices: {e}")
             return stops, limits
 
         for order in orders or []:
@@ -415,13 +433,20 @@ class AlpacaBroker:
         if not self.is_simulated and self.client:
             try:
                 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
-                from alpaca.trading.enums import OrderSide, TimeInForce
+                from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 
+                # order_class=BRACKET is REQUIRED. Without it Alpaca accepts
+                # the take_profit/stop_loss fields, returns a successful
+                # order, and then silently creates NO protective legs. The
+                # position ends up with a stop that does not exist and a
+                # take-profit that does not exist, while every layer of the
+                # bot reports a normal, healthy-looking position.
                 req = MarketOrderRequest(
                     symbol=symbol,
                     qty=qty,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC,
+                    order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)),
                     stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2))
                 )
@@ -431,6 +456,44 @@ class AlpacaBroker:
                     base_delay=1.0,
                     operation_name=f"submit_order({symbol})"
                 )
+                # Verify the protective legs actually exist. A bracket
+                # order can be accepted and still come back without legs,
+                # which leaves the position with no stop and no target
+                # while every status display says everything is fine.
+                # Checking here means the caller learns immediately.
+                time.sleep(1.0)
+                has_stop = False
+                has_limit = False
+                for existing in self._get_symbol_orders(symbol):
+                    order_type = str(getattr(existing, "type", "") or "").lower()
+                    if "stop" in order_type:
+                        has_stop = True
+                    elif "limit" in order_type:
+                        has_limit = True
+
+                if not (has_stop and has_limit):
+                    logger.critical(
+                        f"BRACKET ORDER FOR {symbol} IS MISSING PROTECTIVE LEGS "
+                        f"(stop={has_stop}, target={has_limit}). The position may be "
+                        f"unprotected. Attempting to restore."
+                    )
+                    restored = self.ensure_protective_orders()
+                    if symbol not in restored:
+                        return OrderResult(
+                            success=False,
+                            order_id=str(order.id),
+                            symbol=symbol,
+                            qty=qty,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss_price,
+                            take_profit=take_profit_price,
+                            message=(
+                                "Order filled but the protective stop-loss/take-profit "
+                                "legs were NOT created and could not be restored. "
+                                "Treat this position as unprotected."
+                            ),
+                        )
+
                 return OrderResult(
                     success=True,
                     order_id=str(order.id),
@@ -512,13 +575,9 @@ class AlpacaBroker:
         """
         cancelled = []
         try:
-            from alpaca.trading.requests import GetOrdersRequest
-
-            orders = self.client.get_orders(
-                GetOrdersRequest(status="open", symbols=[symbol], limit=100)
-            )
+            orders = self._get_symbol_orders(symbol)
         except Exception as e:
-            logger.warning(f"Could not list open orders for {symbol}: {e}")
+            logger.warning(f"Could not list working orders for {symbol}: {e}")
             return cancelled
 
         for order in orders or []:
@@ -614,23 +673,68 @@ class AlpacaBroker:
                     f"(P&L: ${pnl:+,.2f}){(' - ' + reason) if reason else ''}"
         )
 
+    # Alpaca's `status=open` filter does NOT include orders in the HELD
+    # status, and a stop-loss on a bracket position is exactly that: it is
+    # held while the entry fills. Querying `open` therefore returns the
+    # take-profit but NEVER the stop-loss.
+    #
+    # That made every protection check in this bot blind to stop-losses:
+    # the trailing-stop logic could not read the current stop, the
+    # protective-order audit believed positions had no protection, and it
+    # then tried to "restore" a stop that was already there -- cancelling
+    # the real one and leaving the position bare.
+    #
+    # Only `status=all` surfaces HELD orders. The set of orders considered
+    # live is then filtered explicitly, since `all` also returns filled,
+    # cancelled and expired orders.
+    _LIVE_ORDER_STATUSES = {
+        "new", "held", "accepted", "accepted_for_bidding", "calculated",
+        "partially_filled", "pending_new", "pending_replace",
+        "pending_cancel", "pending_review", "suspended", "stopped",
+    }
+
+    def _is_live_order(self, order: Any) -> bool:
+        """True if the order is still working (not filled/cancelled/expired)."""
+        status = str(getattr(order, "status", "") or "").lower()
+        if not status:
+            return True
+        return status.split(".")[-1] in self._LIVE_ORDER_STATUSES
+
+    def _get_symbol_orders(self, symbol: str) -> List[Any]:
+        """Returns the WORKING orders for a symbol.
+
+        Includes HELD stop-losses, which Alpaca's `open` filter hides.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+
+            orders = self.client.get_orders(
+                GetOrdersRequest(status="all", symbols=[symbol], limit=100)
+            ) or []
+            return [o for o in orders if self._is_live_order(o)]
+        except Exception as e:
+            logger.warning(f"Could not list working orders for {symbol}: {e}")
+            return []
+
     def update_trailing_stop(self, symbol: str, new_stop: float) -> bool:
         """
         Moves the protective stop on an open position.
 
-        In Alpaca mode the bracket stop is replaced with a new stop order.
+        In Alpaca mode the existing stop order is *replaced* (a PATCH on
+        the order), not cancelled and resubmitted. The old approach
+        cancelled first and submitted second, which left a window where
+        the position had NO protective stop at all. Worse, Alpaca rejects
+        the replacement submit with "insufficient qty available" while
+        the cancelled order's shares are still held -- so the position
+        stayed permanently unprotected. That is the worst possible failure
+        for a position that is being trailed because it is in profit.
+
         In simulator mode the stop recorded on the position is updated.
         """
         if not self.is_simulated and self.client:
             try:
-                from alpaca.trading.requests import StopOrderRequest
+                from alpaca.trading.requests import StopOrderRequest, ReplaceOrderRequest
                 from alpaca.trading.enums import OrderSide, TimeInForce
-
-                # Replace the existing protective stop: Alpaca rejects a
-                # second stop order on the same position while the first is
-                # still open. Only the STOP is cancelled -- the take-profit
-                # must stay in place.
-                self._cancel_symbol_orders(symbol, order_types=("stop",))
 
                 position = self.get_open_positions().get(symbol)
                 qty = int(position.get("qty", 0)) if position else 0
@@ -638,6 +742,29 @@ class AlpacaBroker:
                     logger.warning(f"Cannot trail {symbol}: no open position.")
                     return False
 
+                # Find the existing protective stop and replace it atomically.
+                stop_order = None
+                for order in self._get_symbol_orders(symbol):
+                    order_type = str(getattr(order, "type", "") or "").lower()
+                    if "stop" in order_type:
+                        stop_order = order
+                        break
+
+                if stop_order is not None:
+                    replace_req = ReplaceOrderRequest(
+                        qty=qty,
+                        time_in_force=TimeInForce.GTC,
+                        stop_price=round(new_stop, 2),
+                    )
+                    self.client.replace_order_by_id(stop_order.id, replace_req)
+                    logger.info(
+                        f"Trailing stop for {symbol} moved to ${new_stop:.2f} "
+                        f"(replaced order {stop_order.id})"
+                    )
+                    return True
+
+                # No stop order exists (a previous run may have removed it).
+                # Submit a fresh one so the position is never left bare.
                 req = StopOrderRequest(
                     symbol=symbol,
                     qty=qty,
@@ -647,7 +774,10 @@ class AlpacaBroker:
                     stop_price=round(new_stop, 2),
                 )
                 order = self.client.submit_order(req)
-                logger.info(f"Trailing stop for {symbol} moved to ${new_stop:.2f} (order {order.id})")
+                logger.info(
+                    f"Restored missing trailing stop for {symbol} at ${new_stop:.2f} "
+                    f"(order {order.id})"
+                )
                 return True
             except Exception as e:
                 logger.error(f"Failed to update trailing stop for {symbol}: {e}")
@@ -662,6 +792,112 @@ class AlpacaBroker:
         position.stop_loss = round(new_stop, 2)
         self._save_sim_state()
         return True
+
+    def ensure_protective_orders(self) -> Dict[str, List[str]]:
+        """
+        Makes sure every open position still has a stop-loss and a
+        take-profit.
+
+        This is the safety net. A position with no protective orders can
+        lose money without limit, and nothing else in the bot would notice:
+        the position would still show up in the dashboard, still count
+        toward MAX_OPEN_POSITIONS, and still report a plausible P&L.
+
+        Both legs are submitted as a SINGLE OCO sell order. Two separate
+        sell orders cannot both hold the same shares -- Alpaca reserves
+        the quantity per order, so the second one is rejected with
+        "insufficient qty available". One OCO order reserves the
+        quantity once and carries both the stop and the target.
+
+        Returns a dict of symbol -> list of problems found and fixed.
+        """
+        problems: Dict[str, List[str]] = {}
+        if self.is_simulated or not self.client:
+            return problems
+
+        try:
+            from alpaca.trading.requests import OrderRequest, TakeProfitRequest, StopLossRequest
+            from alpaca.trading.enums import OrderSide, TimeInForce, OrderType, OrderClass
+
+            positions = self.get_open_positions()
+            for symbol, position in positions.items():
+                qty = int(position.get("qty", 0))
+                if qty <= 0:
+                    continue
+
+                has_stop = False
+                has_limit = False
+                stale_orders = []
+                for order in self._get_symbol_orders(symbol):
+                    order_type = str(getattr(order, "type", "") or "").lower()
+                    if "stop" in order_type:
+                        has_stop = True
+                        stale_orders.append(order)
+                    elif "limit" in order_type:
+                        has_limit = True
+                        stale_orders.append(order)
+
+                if has_stop and has_limit:
+                    continue
+
+                entry = float(position.get("entry_price", 0.0))
+                current = float(position.get("current_price", entry))
+                reference = entry or current
+                stop_price = round(reference * 0.995, 2)
+                limit_price = round(reference * 1.01, 2)
+
+                # Cancel whatever partial protection exists first. It has
+                # to go before the combined OCO can reserve the shares.
+                for order in stale_orders:
+                    try:
+                        self.client.cancel_order_by_id(order.id)
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not cancel order {order.id} for {symbol}: {e}"
+                        )
+
+                try:
+                    # order_class=OCO makes this an exit order for an
+                    # existing position: one order reserving the shares
+                    # once, carrying both the stop and the target.
+                    #
+                    # The `type` MUST be LIMIT for an OCO exit. With
+                    # type=MARKET Alpaca ignores the legs entirely and
+                    # fills the order immediately at market -- which
+                    # closes the position instead of protecting it.
+                    req = OrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=OrderSide.SELL,
+                        type=OrderType.LIMIT,
+                        time_in_force=TimeInForce.GTC,
+                        order_class=OrderClass.OCO,
+                        take_profit=TakeProfitRequest(limit_price=limit_price),
+                        stop_loss=StopLossRequest(stop_price=stop_price),
+                    )
+                    self.client.submit_order(req)
+                    missing = []
+                    if not has_stop:
+                        missing.append(f"stop-loss at ${stop_price:,.2f}")
+                    if not has_limit:
+                        missing.append(f"take-profit at ${limit_price:,.2f}")
+                    problems.setdefault(symbol, []).append(
+                        "Restored missing " + " and ".join(missing)
+                    )
+                    logger.warning(
+                        f"POSITION {symbol} WAS MISSING PROTECTION. "
+                        f"Restored {' and '.join(missing)}."
+                    )
+                except Exception as e:
+                    logger.error(f"Could not restore protective orders for {symbol}: {e}")
+                    problems.setdefault(symbol, []).append(
+                        f"FAILED to restore protection: {e}"
+                    )
+
+        except Exception as e:
+            logger.error(f"Could not verify protective orders: {e}")
+
+        return problems
 
     def update_simulated_prices(self, price_map: Dict[str, float]) -> List[str]:
         """
