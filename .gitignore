@@ -43,3 +43,8 @@ strategy_state.json.pre_fix_backup
 # Liveness heartbeat written by the live loop. Runtime state, not source.
 bot_heartbeat.json
 bot_heartbeat.tmp
+
+# Trade journal database
+trades.db
+*.db
+*.sqlite

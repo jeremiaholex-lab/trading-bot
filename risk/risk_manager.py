@@ -1,8 +1,9 @@
 import logging
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Any, List
 from config import Config
 from strategy.adaptive_strategy import TradeSignal
+from .earnings_filter import EarningsFilter
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +20,19 @@ class RiskManager:
     Enforces institutional-grade risk controls:
     1. Volatility-based position sizing
     2. Portfolio heat & open position caps
-    3. Daily drawdown circuit breaker
-    4. Trailing stops and profit protection
+    3. Sector & correlation exposure limits
+    4. Binary event & earnings blackout guards
+    5. Daily drawdown circuit breaker
+    6. Trailing stops and profit protection
     """
 
-    def __init__(self):
+    def __init__(self, earnings_filter: Optional[EarningsFilter] = None):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
         self.daily_drawdown_limit = Config.DAILY_DRAWDOWN_LIMIT
         self.start_of_day_equity: Optional[float] = None
         self.circuit_breaker_tripped: bool = False
+        self.earnings_filter = earnings_filter or EarningsFilter()
 
     def update_start_of_day_equity(self, current_equity: float):
         """Initializes or resets the benchmark equity for the trading day."""
@@ -38,7 +42,7 @@ class RiskManager:
     def check_circuit_breaker(self, current_equity: float) -> bool:
         """
         Returns True if the circuit breaker is tripped due to daily drawdown limit.
-        Haults all new entry orders.
+        Halts all new entry orders.
         """
         if self.start_of_day_equity is None or self.start_of_day_equity <= 0:
             self.start_of_day_equity = current_equity
@@ -63,10 +67,12 @@ class RiskManager:
         portfolio_equity: float,
         cash_available: float,
         current_open_positions_count: int,
-        already_holding_symbol: bool
+        already_holding_symbol: bool,
+        open_positions: Optional[Dict[str, Any]] = None,
     ) -> PositionSizeResult:
         """
-        Calculates exact number of shares to buy using strict volatility risk sizing.
+        Calculates exact number of shares to buy using strict volatility risk sizing
+        and validates institutional risk gates (drawdown, correlation, earnings).
         Formula:
             Max Risk $ = Equity * MAX_RISK_PCT
             Risk Per Share = Entry Price - Stop Loss Price
@@ -102,7 +108,42 @@ class RiskManager:
                 rejection_reason=f"Max concurrent positions ({self.max_positions}) reached."
             )
 
-        # 4. Minimum confidence filter
+        # 4. Sector & Correlation Exposure Cap
+        if open_positions:
+            candidate_sector = Config.SECTOR_MAP.get(signal.symbol, "OTHER")
+            if candidate_sector not in ("INDEX", "OTHER"):
+                sector_positions = [
+                    sym for sym in open_positions
+                    if Config.SECTOR_MAP.get(sym, "OTHER") == candidate_sector
+                ]
+                if len(sector_positions) >= Config.MAX_POSITIONS_PER_SECTOR:
+                    return PositionSizeResult(
+                        allowed=False,
+                        shares=0,
+                        cost=0.0,
+                        risk_amount=0.0,
+                        rejection_reason=(
+                            f"Sector exposure limit reached: already holding {len(sector_positions)} position(s) "
+                            f"in sector '{candidate_sector}' (max {Config.MAX_POSITIONS_PER_SECTOR}). "
+                            f"Active: {', '.join(sector_positions)}."
+                        )
+                    )
+
+        # 5. Binary Event & Earnings Blackout Guard
+        if Config.ENABLE_EARNINGS_FILTER and self.earnings_filter:
+            in_blackout, earnings_reason = self.earnings_filter.is_in_blackout(
+                signal.symbol, blackout_days=Config.EARNINGS_BLACKOUT_DAYS
+            )
+            if in_blackout:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Earnings Blackout: {earnings_reason}."
+                )
+
+        # 6. Minimum confidence filter
         if signal.confidence < 0.60:
             return PositionSizeResult(
                 allowed=False,
@@ -181,7 +222,7 @@ class RiskManager:
     ) -> float:
         """
         Dynamic profit locking:
-        - If profit > 1.5R (1.5 * initial risk), move stop to break-even + small profit.
+        - If profit > 1.0R, move stop to break-even + fee buffer.
         - If price reaches higher highs, trail by ATR multiplier.
         """
         initial_risk = entry_price - current_stop
@@ -196,5 +237,8 @@ class RiskManager:
         # Step 2: ATR Trailing Stop
         trailing_stop = current_price - (atr * atr_multiplier)
         new_stop = max(new_stop, trailing_stop)
+
+        # A trailing stop must never loosen
+        new_stop = max(new_stop, current_stop)
 
         return round(new_stop, 2)

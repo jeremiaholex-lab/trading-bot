@@ -54,6 +54,38 @@ class Config:
     PROFIT_TARGET_RR: float = float(os.getenv("PROFIT_TARGET_RR", "2.0")) # 2:1 Reward to Risk ratio
     MIN_CASH_BUFFER_PCT: float = 0.10 # Keep at least 10% in cash
 
+    # Sector & Correlation Exposure Control
+    MAX_POSITIONS_PER_SECTOR: int = int(os.getenv("MAX_POSITIONS_PER_SECTOR", "2"))
+    SECTOR_MAP: dict = {
+        "SPY": "INDEX",
+        "QQQ": "TECH_INDEX",
+        "AAPL": "TECH",
+        "MSFT": "TECH",
+        "NVDA": "SEMIS",
+        "AMD": "SEMIS",
+        "TSLA": "AUTO_TECH",
+        "SH": "INVERSE_INDEX",
+        "PSQ": "INVERSE_INDEX",
+    }
+
+    # Bear Market Monetization & Inverse ETFs
+    ENABLE_INVERSE_ETFS: bool = os.getenv("ENABLE_INVERSE_ETFS", "True").lower() in ("true", "1", "yes")
+    INVERSE_ETF_MAP: dict = {"SPY": "SH", "QQQ": "PSQ"}
+    INVERSE_ETFS: list = ["SH", "PSQ"]
+
+    # Event Risk & Earnings Blackout
+    ENABLE_EARNINGS_FILTER: bool = os.getenv("ENABLE_EARNINGS_FILTER", "True").lower() in ("true", "1", "yes")
+    EARNINGS_BLACKOUT_DAYS: int = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
+
+    # Macro Market Trend Confluence Filter
+    ENABLE_MACRO_TREND_FILTER: bool = os.getenv("ENABLE_MACRO_TREND_FILTER", "True").lower() in ("true", "1", "yes")
+    MACRO_BENCHMARK_SYMBOLS: list = ["SPY", "QQQ"]
+
+    # Partial Profit-Taking (Staged Exits / Scale-Outs)
+    ENABLE_PARTIAL_PROFIT_TAKING: bool = os.getenv("ENABLE_PARTIAL_PROFIT_TAKING", "True").lower() in ("true", "1", "yes")
+    SCALE_OUT_RR: float = float(os.getenv("SCALE_OUT_RR", "1.2"))
+    SCALE_OUT_PERCENT: float = float(os.getenv("SCALE_OUT_PERCENT", "0.50"))
+
     # Self-Improvement & Parameter Tuning
     ENABLE_SELF_IMPROVEMENT: bool = os.getenv("ENABLE_SELF_IMPROVEMENT", "True").lower() in ("true", "1", "yes")
     OPTIMIZATION_INTERVAL_HOURS: int = int(os.getenv("OPTIMIZATION_INTERVAL_HOURS", "24"))
@@ -161,6 +193,21 @@ class Config:
         if not (0.0 <= cls.MIN_CASH_BUFFER_PCT < 1.0):
             errors.append(f"MIN_CASH_BUFFER_PCT must be between 0.0 and 1.0 (got {cls.MIN_CASH_BUFFER_PCT})")
 
+        # Validate sector cap
+        if cls.MAX_POSITIONS_PER_SECTOR < 1:
+            errors.append(f"MAX_POSITIONS_PER_SECTOR must be >= 1 (got {cls.MAX_POSITIONS_PER_SECTOR})")
+
+        # Validate earnings blackout days
+        if cls.EARNINGS_BLACKOUT_DAYS < 0:
+            errors.append(f"EARNINGS_BLACKOUT_DAYS must be >= 0 (got {cls.EARNINGS_BLACKOUT_DAYS})")
+
+        # Validate partial profit taking
+        if not (0.0 < cls.SCALE_OUT_PERCENT < 1.0):
+            errors.append(f"SCALE_OUT_PERCENT must be between 0 and 1 (got {cls.SCALE_OUT_PERCENT})")
+
+        if cls.SCALE_OUT_RR < 0.5:
+            errors.append(f"SCALE_OUT_RR must be >= 0.5 (got {cls.SCALE_OUT_RR})")
+
         # Validate watchlist
         if not cls.WATCHLIST or not all(cls._is_valid_ticker(s) for s in cls.WATCHLIST):
             errors.append("WATCHLIST must contain at least one valid ticker symbol")
@@ -205,4 +252,3 @@ class Config:
 
 # Ensure logs directory exists
 Config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
-

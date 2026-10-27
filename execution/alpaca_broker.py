@@ -104,6 +104,7 @@ class AlpacaBroker:
         # recorded, so daily P&L reads as zero rather than as a fabricated
         # number.
         self.sim_last_equity = 100000.0
+        self.last_simulated_exit_details: List[Dict[str, Any]] = []
 
         # The simulator's state is persisted so a restart does not silently
         # wipe open positions. Previously cash and positions lived only in
@@ -606,7 +607,9 @@ class AlpacaBroker:
                 from alpaca.trading.requests import MarketOrderRequest
                 from alpaca.trading.enums import OrderSide, TimeInForce
 
-                self._cancel_symbol_orders(symbol)
+                cancelled = self._cancel_symbol_orders(symbol)
+                if cancelled:
+                    time.sleep(0.8)
 
                 req = MarketOrderRequest(
                     symbol=symbol,
@@ -652,10 +655,18 @@ class AlpacaBroker:
                 message=f"No open position for {symbol}.",
             )
 
-        proceeds = position.qty * position.current_price
+        close_qty = min(qty, position.qty) if (qty is not None and qty > 0) else position.qty
+        proceeds = close_qty * position.current_price
         self.sim_cash += proceeds
-        pnl = (position.current_price - position.entry_price) * position.qty
-        del self.sim_positions[symbol]
+        pnl = (position.current_price - position.entry_price) * close_qty
+
+        if close_qty >= position.qty:
+            del self.sim_positions[symbol]
+            action_desc = f"Closed {close_qty} shares"
+        else:
+            position.qty -= close_qty
+            action_desc = f"Partially closed {close_qty} shares (remaining: {position.qty})"
+
         self._save_sim_state()
 
         order_id = f"SIM-CLOSE-{self.order_counter}"
@@ -665,11 +676,11 @@ class AlpacaBroker:
             success=True,
             order_id=order_id,
             symbol=symbol,
-            qty=position.qty,
+            qty=close_qty,
             entry_price=position.entry_price,
             stop_loss=0.0,
             take_profit=0.0,
-            message=f"Closed {position.qty} shares of {symbol} at ${position.current_price:.2f} "
+            message=f"{action_desc} of {symbol} at ${position.current_price:.2f} "
                     f"(P&L: ${pnl:+,.2f}){(' - ' + reason) if reason else ''}"
         )
 
@@ -909,6 +920,7 @@ class AlpacaBroker:
 
         exits = []
         to_remove = []
+        exit_details = []
 
         for sym, pos in self.sim_positions.items():
             if sym in price_map:
@@ -919,14 +931,30 @@ class AlpacaBroker:
                 if curr_price <= pos.stop_loss:
                     pl = (pos.stop_loss - pos.entry_price) * pos.qty
                     self.sim_cash += pos.qty * pos.stop_loss
+                    reason = f"Stop Loss triggered at ${pos.stop_loss:.2f}"
                     exits.append(f"🔴 STOP LOSS TRIGGERED for {sym}: Sold {pos.qty} shares at ${pos.stop_loss:.2f} (P&L: ${pl:+,.2f})")
+                    exit_details.append({
+                        "symbol": sym,
+                        "qty": pos.qty,
+                        "exit_price": pos.stop_loss,
+                        "pnl": pl,
+                        "reason": reason,
+                    })
                     to_remove.append(sym)
 
                 # Check Take Profit
                 elif curr_price >= pos.take_profit:
                     pl = (pos.take_profit - pos.entry_price) * pos.qty
                     self.sim_cash += pos.qty * pos.take_profit
+                    reason = f"Take Profit hit at ${pos.take_profit:.2f}"
                     exits.append(f"🟢 TAKE PROFIT HIT for {sym}: Sold {pos.qty} shares at ${pos.take_profit:.2f} (P&L: ${pl:+,.2f})")
+                    exit_details.append({
+                        "symbol": sym,
+                        "qty": pos.qty,
+                        "exit_price": pos.take_profit,
+                        "pnl": pl,
+                        "reason": reason,
+                    })
                     to_remove.append(sym)
 
         for sym in to_remove:
@@ -935,4 +963,5 @@ class AlpacaBroker:
         if to_remove:
             self._save_sim_state()
 
+        self.last_simulated_exit_details = exit_details
         return exits

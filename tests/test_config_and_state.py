@@ -16,9 +16,11 @@ from config import Config
 # ----------------------------------------------------------------------
 def test_every_valid_timeframe_is_handled_by_the_data_layer():
     """Config and the data layer must agree on the set of timeframes."""
+    import inspect
     from data.market_data import MarketDataProvider
 
-    source = Path(MarketDataProvider.__module__ and "data/market_data.py").read_text(encoding="utf-8")
+    market_data_file = Path(inspect.getfile(MarketDataProvider)).resolve()
+    source = market_data_file.read_text(encoding="utf-8")
 
     for tf in Config.VALID_TIMEFRAMES:
         assert f'"{tf}"' in source, (

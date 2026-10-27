@@ -18,11 +18,13 @@ from config import Config
 from data.market_data import MarketDataProvider
 from strategy.adaptive_strategy import AdaptiveStrategy, TradeSignal
 from strategy.scanner import AssetScanner
+from strategy.macro_filter import MacroTrendFilter
 from risk.risk_manager import RiskManager
 from optimizer.self_improver import SelfImprover
 from optimizer.backtester import StrategyBacktester
 from execution.alpaca_broker import AlpacaBroker
 from execution.webhook import WebhookNotifier
+from execution.trade_journal import TradeJournal
 
 # Configure UTF-8 encoding for Windows console compatibility
 if sys.platform == "win32":
@@ -71,6 +73,8 @@ class TradingBotOrchestrator:
         self.risk_mgr = RiskManager()
         self.self_improver = SelfImprover()
         self.notifier = WebhookNotifier()
+        self.macro_filter = MacroTrendFilter()
+        self._scaled_out_positions = set()
 
         # Initialize start of day equity
         acc = self.broker.get_account_summary()
@@ -107,6 +111,18 @@ class TradingBotOrchestrator:
             self._session_warnings = []
         if getattr(self, "_session_scans", None) is None:
             self._session_scans = 0
+        if getattr(self, "_scaled_out_positions", None) is None:
+            self._scaled_out_positions = set()
+        if getattr(self, "macro_filter", None) is None:
+            self.macro_filter = MacroTrendFilter()
+
+
+    @property
+    def journal(self) -> TradeJournal:
+        """Lazily created so orchestrators built without __init__ still work."""
+        if getattr(self, "_journal", None) is None:
+            self._journal = TradeJournal()
+        return self._journal
 
     def print_dashboard_status(self):
         """Displays rich terminal dashboard of portfolio status and open trades."""
@@ -152,11 +168,8 @@ class TradingBotOrchestrator:
 
     def _notify_order(self, side: str, symbol: str, qty: int, price: float, reason: str = ""):
         """Sends a trade notification. Never allowed to break the trading loop."""
-        notifier = getattr(self, "notifier", None)
-        if notifier is None:
-            return
         # Record it for the session report first. The report must include
-        # every trade even if the webhook itself fails.
+        # every trade even if webhook is not configured or fails.
         self._ensure_session_state()
         self._session_trades.append({
             "side": side,
@@ -165,6 +178,9 @@ class TradingBotOrchestrator:
             "price": price,
             "reason": reason,
         })
+        notifier = getattr(self, "notifier", None)
+        if notifier is None:
+            return
         try:
             notifier.notify_order_execution(symbol, side, qty, price)
         except Exception as e:
@@ -407,8 +423,15 @@ class TradingBotOrchestrator:
         # universe. Without this the bot took every BUY signal it saw, so a
         # weak setup could consume the last position slot ahead of a
         # high-conviction one.
+        # Inverse ETFs (SH / PSQ) join the scan universe so the short side can
+        # be taken through a plain long bracket when the macro gate is bearish.
+        # The macro filter blocks them outside a downtrend.
+        universe = list(Config.WATCHLIST)
+        if Config.ENABLE_INVERSE_ETFS:
+            universe += [s for s in Config.INVERSE_ETFS if s not in universe]
+
         frames = {}
-        for sym in Config.WATCHLIST:
+        for sym in universe:
             df = self.market_data.get_historical_bars(
                 sym,
                 timeframe=Config.BAR_TIMEFRAME,
@@ -417,17 +440,28 @@ class TradingBotOrchestrator:
             if not df.empty and len(df) >= 50:
                 frames[sym] = df
 
+        # Macro market environment evaluation
+        macro_state = {}
+        if Config.ENABLE_MACRO_TREND_FILTER and hasattr(self, "macro_filter"):
+            try:
+                macro_state = self.macro_filter.evaluate_macro_environment(self.market_data)
+                if macro_state.get("is_bearish"):
+                    b_str = ", ".join(macro_state.get("bearish_benchmarks", []))
+                    console.print(f"[bold yellow]⚠️ Macro Market Alert: Benchmarks ({b_str}) in Daily TRENDING_BEAR. Longs gated by relative strength.[/bold yellow]")
+            except Exception as e:
+                logger.warning(f"Macro market evaluation error: {e}")
+
         # Rank by conviction; the highest-scoring symbols are considered first.
-        conviction_order = list(Config.WATCHLIST)
+        conviction_order = list(universe)
         conviction_scores = {}
         if frames:
             try:
-                ranked = AssetScanner(Config.WATCHLIST).scan_and_rank(frames)
+                ranked = AssetScanner(universe).scan_and_rank(frames)
                 ranked_symbols = [r["symbol"] for r in ranked]
                 conviction_scores = {r["symbol"]: r["score"] for r in ranked}
                 conviction_order = (
-                    [s for s in ranked_symbols if s in Config.WATCHLIST]
-                    + [s for s in Config.WATCHLIST if s not in ranked_symbols]
+                    [s for s in ranked_symbols if s in universe]
+                    + [s for s in universe if s not in ranked_symbols]
                 )
             except Exception as e:
                 logger.warning(f"Conviction ranking failed, falling back to watchlist order: {e}")
@@ -484,13 +518,34 @@ class TradingBotOrchestrator:
 
             # If BUY signal, process with institutional risk manager
             if signal.action == "BUY":
-                size_res = self.risk_mgr.calculate_position_size(
-                    signal=signal,
-                    portfolio_equity=acc['equity'],
-                    cash_available=acc['cash'],
-                    current_open_positions_count=len(open_pos),
-                    already_holding_symbol=sym in open_pos
-                )
+                # Check Macro Market Trend Gate
+                if Config.ENABLE_MACRO_TREND_FILTER and hasattr(self, "macro_filter"):
+                    try:
+                        daily_df = self.market_data.get_historical_bars(sym, timeframe="1Day", days_back=60)
+                        macro_ok, macro_reason = self.macro_filter.validate_candidate_long(sym, daily_df, macro_state)
+                        if not macro_ok:
+                            console.print(f"[yellow]⚠️ Signal on {sym} skipped by Macro Trend Gate: {macro_reason}[/yellow]")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Macro check failed for {sym}: {e}")
+
+                try:
+                    size_res = self.risk_mgr.calculate_position_size(
+                        signal=signal,
+                        portfolio_equity=acc['equity'],
+                        cash_available=acc['cash'],
+                        current_open_positions_count=len(open_pos),
+                        already_holding_symbol=sym in open_pos,
+                        open_positions=open_pos
+                    )
+                except TypeError:
+                    size_res = self.risk_mgr.calculate_position_size(
+                        signal=signal,
+                        portfolio_equity=acc['equity'],
+                        cash_available=acc['cash'],
+                        current_open_positions_count=len(open_pos),
+                        already_holding_symbol=sym in open_pos
+                    )
 
                 if size_res.allowed:
                     console.print(
@@ -511,6 +566,14 @@ class TradingBotOrchestrator:
                     if order_res.success:
                         console.print(f"   ✅ [bold green]{order_res.message}[/bold green]")
                         self._notify_order("BUY", sym, size_res.shares, signal.entry_price, signal.reason)
+                        self.journal.record_entry(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            reason=signal.reason,
+                        )
                     else:
                         console.print(f"   ❌ [bold red]Order failed: {order_res.message}[/bold red]")
                 else:
@@ -541,6 +604,9 @@ class TradingBotOrchestrator:
                 if close_res.success:
                     console.print(f"   ✅ [bold green]{close_res.message}[/bold green]")
                     self._notify_order("SELL", sym, qty, position.get("current_price", 0.0), signal.reason)
+                    self.journal.record_full_exit(sym, float(position.get("current_price", 0.0)), signal.reason)
+                    if hasattr(self, "_scaled_out_positions"):
+                        self._scaled_out_positions.discard(sym)
                 else:
                     console.print(f"   ❌ [bold red]Close failed: {close_res.message}[/bold red]")
 
@@ -550,6 +616,21 @@ class TradingBotOrchestrator:
         exits = self.broker.update_simulated_prices(price_map)
         for exit_msg in exits:
             console.print(f"[bold yellow]{exit_msg}[/bold yellow]")
+
+        # Record simulated exits in session trades and journal
+        sim_exit_details = getattr(self.broker, "last_simulated_exit_details", [])
+        if sim_exit_details:
+            for ed in sim_exit_details:
+                e_sym = ed["symbol"]
+                e_qty = ed["qty"]
+                e_price = ed["exit_price"]
+                e_reason = ed["reason"]
+                self._notify_order("SELL", e_sym, e_qty, e_price, e_reason)
+                self.journal.record_full_exit(e_sym, e_price, e_reason)
+                if hasattr(self, "_scaled_out_positions"):
+                    self._scaled_out_positions.discard(e_sym)
+            if hasattr(self.broker, "last_simulated_exit_details"):
+                self.broker.last_simulated_exit_details = []
 
         # Apply trailing stops to open positions that have run up.
         self._apply_trailing_stops(price_map)
@@ -567,11 +648,19 @@ class TradingBotOrchestrator:
         """
         open_pos = self.broker.get_open_positions()
         if not open_pos:
+            if hasattr(self, "_scaled_out_positions"):
+                self._scaled_out_positions.clear()
             return
+
+        # Keep _scaled_out_positions pruned to currently open symbols only
+        if hasattr(self, "_scaled_out_positions"):
+            self._scaled_out_positions.intersection_update(set(open_pos.keys()))
 
         for sym, position in open_pos.items():
             entry = float(position.get("entry_price", 0.0))
             current = float(position.get("current_price", 0.0))
+            if current > 0:
+                self.journal.update_price_excursions(sym, current)
             current_stop = float(position.get("stop_loss", 0.0))
             if entry <= 0 or current <= 0 or current_stop <= 0:
                 continue
@@ -590,6 +679,56 @@ class TradingBotOrchestrator:
                     atr = 0.0
             if atr <= 0:
                 atr = current * 0.015
+
+            qty = int(position.get("qty", 0))
+
+            # --- Partial Profit-Taking (Scale-Out) ---
+            initial_risk = max(entry - current_stop, atr * 1.5)
+            unrealized_gain = current - entry
+            scaled_out_set = getattr(self, "_scaled_out_positions", set())
+
+            if (
+                Config.ENABLE_PARTIAL_PROFIT_TAKING
+                and sym not in scaled_out_set
+                and qty >= 2
+                and unrealized_gain >= (Config.SCALE_OUT_RR * initial_risk)
+            ):
+                scale_qty = int(qty * Config.SCALE_OUT_PERCENT)
+                if scale_qty > 0:
+                    rr_achieved = unrealized_gain / initial_risk if initial_risk > 0 else 1.0
+                    console.print(
+                        f"\n[bold green]🎯 PARTIAL PROFIT SCALE-OUT FOR {sym}:[/bold green] "
+                        f"Booking {scale_qty} of {qty} shares @ ${current:.2f} "
+                        f"(Gain: +{unrealized_gain / entry * 100:.2f}% | {rr_achieved:.1f}R)"
+                    )
+                    close_res = self.broker.place_close_position_order(
+                        symbol=sym,
+                        qty=scale_qty,
+                        reason=f"Scale-out: 50% profit booked at {rr_achieved:.1f}R"
+                    )
+                    if close_res.success:
+                        if not hasattr(self, "_scaled_out_positions"):
+                            self._scaled_out_positions = set()
+                        self._scaled_out_positions.add(sym)
+                        console.print(f"   ✅ [bold green]{close_res.message}[/bold green]")
+                        self._notify_order(
+                            "PARTIAL_CLOSE", sym, scale_qty, current,
+                            f"Scale-out booked at {rr_achieved:.1f}R"
+                        )
+                        self.journal.record_partial_exit(
+                            symbol=sym,
+                            qty=scale_qty,
+                            exit_price=current,
+                            reason=f"Scale-out: 50% profit booked at {rr_achieved:.1f}R",
+                        )
+                        # Move stop on remaining shares to breakeven + fee buffer immediately
+                        breakeven_stop = round(entry + (atr * 0.2), 2)
+                        if breakeven_stop > current_stop:
+                            if self.broker.update_trailing_stop(sym, breakeven_stop):
+                                console.print(
+                                    f"   🛡️ Stop for remaining {qty - scale_qty} shares moved to Breakeven: ${breakeven_stop:.2f}"
+                                )
+                        continue
 
             new_stop = self.risk_mgr.calculate_trailing_stop(
                 entry_price=entry,
@@ -803,6 +942,11 @@ class TradingBotOrchestrator:
                     self.risk_mgr.circuit_breaker_tripped = False
                     self.risk_mgr.update_start_of_day_equity(acc['equity'])
                     logger.info(f"Daily reset complete. Start-of-day equity: ${acc['equity']:,.2f}")
+
+                    # Prune or reset scale-out state for closed positions
+                    if hasattr(self, "_scaled_out_positions"):
+                        active_syms = set(self.broker.get_open_positions().keys())
+                        self._scaled_out_positions.intersection_update(active_syms)
 
                     # Pre-market calibration if parameters are stale
                     if auto_calibrate and Config.ENABLE_SELF_IMPROVEMENT:
