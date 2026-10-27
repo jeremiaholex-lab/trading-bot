@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="Regime classifier decision tree: a bar with its indicators is classified as HIGH_VOLATILITY if ATR percentile spikes (that takes precedence), otherwise TRENDING_BULL if the moving averages and MACD align bullish, TRENDING_BEAR if they align bearish, and RANGING otherwise.">
+  <style>
+    svg {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      --card: #fcfcfb;
+      --cardborder: rgba(11,11,11,0.10);
+      --ink: #0b0b0b;
+      --ink2: #52514e;
+      --muted: #898781;
+      --arrow: #898781;
+      --dec: #6250d6;
+      --bull: #0ca30c;
+      --bear: #d03b3b;
+      --vol: #eb6834;
+      --rang: #898781;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --card: #1a1a19;
+        --cardborder: rgba(255,255,255,0.10);
+        --ink: #f0efec;
+        --ink2: #c3c2b7;
+        --muted: #898781;
+        --arrow: #898781;
+        --dec: #9085e9;
+        --bull: #0ca30c;
+        --bear: #e66767;
+        --vol: #d95926;
+        --rang: #898781;
+      }
+    }
+    .t { font-size: 14px; font-weight: 700; fill: var(--ink); }
+    .s { font-size: 11px; font-weight: 400; fill: var(--ink2); }
+    .dec { stroke-width: 1.5; }
+    .flow { stroke: var(--arrow); stroke-width: 1.5; fill: none; }
+    .yn { font-size: 11px; font-weight: 700; }
+    .yes { fill: var(--bull); }
+    .no { fill: var(--muted); }
+  </style>
+  <defs>
+    <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--arrow)"/>
+    </marker>
+  </defs>
+
+  <!-- Card background -->
+  <rect x="0.5" y="0.5" width="959" height="539" rx="14" fill="var(--card)" stroke="var(--cardborder)"/>
+
+  <!-- Start -->
+  <g>
+    <rect x="340" y="20" width="160" height="52" rx="9" fill="var(--dec)" fill-opacity="0.14" stroke="var(--dec)" stroke-width="1.5"/>
+    <text class="t" x="420" y="43" text-anchor="middle">Bar + indicators</text>
+    <text class="s" x="420" y="60" text-anchor="middle">EMA · MACD · ATR% · MTF</text>
+  </g>
+  <line class="flow" x1="420" y1="72" x2="420" y2="112" marker-end="url(#ah2)"/>
+
+  <!-- D1: volatility -->
+  <g class="dec">
+    <rect x="300" y="120" width="240" height="52" rx="9" fill="var(--vol)" fill-opacity="0.12" stroke="var(--vol)"/>
+    <text class="t" x="420" y="143" text-anchor="middle">Volatility spike?</text>
+    <text class="s" x="420" y="160" text-anchor="middle">ATR% &gt; 90th percentile × 1.25</text>
+  </g>
+  <line class="flow" x1="540" y1="146" x2="592" y2="146" marker-end="url(#ah2)"/>
+  <text class="yn yes" x="566" y="136" text-anchor="middle">yes</text>
+  <line class="flow" x1="420" y1="172" x2="420" y2="210" marker-end="url(#ah2)"/>
+  <text class="yn no" x="432" y="196" text-anchor="start">no</text>
+
+  <!-- HIGH_VOLATILITY -->
+  <g>
+    <rect x="600" y="120" width="170" height="52" rx="9" fill="var(--vol)" fill-opacity="0.22" stroke="var(--vol)" stroke-width="1.5"/>
+    <text class="t" x="685" y="143" text-anchor="middle">HIGH_VOLATILITY</text>
+    <text class="s" x="685" y="160" text-anchor="middle">hold, preserve capital</text>
+  </g>
+
+  <!-- D2: bull -->
+  <g class="dec">
+    <rect x="300" y="218" width="240" height="52" rx="9" fill="var(--bull)" fill-opacity="0.10" stroke="var(--bull)"/>
+    <text class="t" x="420" y="241" text-anchor="middle">Bull alignment?</text>
+    <text class="s" x="420" y="258" text-anchor="middle">fast&gt;slow · price&gt;EMA50 · MACD&gt;0</text>
+  </g>
+  <line class="flow" x1="540" y1="244" x2="592" y2="244" marker-end="url(#ah2)"/>
+  <text class="yn yes" x="566" y="234" text-anchor="middle">yes</text>
+  <line class="flow" x1="420" y1="270" x2="420" y2="308" marker-end="url(#ah2)"/>
+  <text class="yn no" x="432" y="294" text-anchor="start">no</text>
+
+  <!-- TRENDING_BULL -->
+  <g>
+    <rect x="600" y="218" width="170" height="52" rx="9" fill="var(--bull)" fill-opacity="0.20" stroke="var(--bull)" stroke-width="1.5"/>
+    <text class="t" x="685" y="241" text-anchor="middle">TRENDING_BULL</text>
+    <text class="s" x="685" y="258" text-anchor="middle">buy pullbacks, 2:1 R:R</text>
+  </g>
+
+  <!-- D3: bear -->
+  <g class="dec">
+    <rect x="300" y="316" width="240" height="52" rx="9" fill="var(--bear)" fill-opacity="0.10" stroke="var(--bear)"/>
+    <text class="t" x="420" y="339" text-anchor="middle">Bear alignment?</text>
+    <text class="s" x="420" y="356" text-anchor="middle">fast&lt;slow · price&lt;EMA50 · MACD&lt;0</text>
+  </g>
+  <line class="flow" x1="540" y1="342" x2="592" y2="342" marker-end="url(#ah2)"/>
+  <text class="yn yes" x="566" y="332" text-anchor="middle">yes</text>
+  <line class="flow" x1="420" y1="368" x2="420" y2="406" marker-end="url(#ah2)"/>
+  <text class="yn no" x="432" y="392" text-anchor="start">no</text>
+
+  <!-- TRENDING_BEAR -->
+  <g>
+    <rect x="600" y="316" width="170" height="52" rx="9" fill="var(--bear)" fill-opacity="0.20" stroke="var(--bear)" stroke-width="1.5"/>
+    <text class="t" x="685" y="339" text-anchor="middle">TRENDING_BEAR</text>
+    <text class="s" x="685" y="356" text-anchor="middle">avoid longs, wait</text>
+  </g>
+
+  <!-- RANGING -->
+  <g>
+    <rect x="340" y="414" width="160" height="52" rx="9" fill="var(--rang)" fill-opacity="0.16" stroke="var(--rang)" stroke-width="1.5"/>
+    <text class="t" x="420" y="437" text-anchor="middle">RANGING</text>
+    <text class="s" x="420" y="454" text-anchor="middle">Bollinger mean reversion</text>
+  </g>
+</svg>

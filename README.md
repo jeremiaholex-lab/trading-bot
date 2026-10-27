@@ -38,6 +38,9 @@ The gate calibration from that study:
 
 Loosening the trade gate raises the adoption rate but loses the edge. The shipped defaults sit at the row that worked.
 
+<p align="center"><img src="docs/optimizer-gates.svg" alt="Walk-forward optimizer and adoption gates: the best candidate is picked on the 70% train set, scored exactly once on the 30% holdout, and must pass three gates — fitness at least zero, at least 0.25 improvement over the parameters in use, and at least three holdout trades — before adoption." width="820"></p>
+<p align="center"><em>Adoption is a conjunction, not a threshold. The candidate is chosen on the train set and scored exactly once on the holdout; all three gates must pass, otherwise the defaults stay.</em></p>
+
 ### 3. The search runs on its own timeframe
 
 Live signals use 15-minute bars. The parameter search uses **1-hour bars over 400 days**.
@@ -49,6 +52,9 @@ This separation is not cosmetic. Alpaca serves only ~1,534 bars of 15-minute his
 ## Features
 
 **Market regime detection** — classifies conditions into `TRENDING_BULL`, `TRENDING_BEAR`, `RANGING`, or `HIGH_VOLATILITY` from EMA structure, MACD, ATR percentile, and Bollinger width. Every downstream decision branches on the regime.
+
+<p align="center"><img src="docs/regime.svg" alt="Regime classifier decision tree: a bar is HIGH_VOLATILITY if ATR percentile spikes (that takes precedence), otherwise TRENDING_BULL or TRENDING_BEAR if the moving averages and MACD align, and RANGING otherwise." width="720"></p>
+<p align="center"><em>How a bar becomes a regime. A volatility spike wins regardless of trend alignment because it is assigned last — so the strategy sits out of the market rather than trading a violent trend.</em></p>
 
 **Asymmetric risk/reward strategy** — buys low-risk pullbacks in confirmed uptrends (EMA support test with an RSI dip and volume confirmation), and takes Bollinger mean reversion when the market is ranging. The reward-to-risk ratio is structural rather than filtered: the stop sits at 1.8× ATR and the target at `PROFIT_TARGET_RR` times that distance, so every entry is asymmetric by construction. In `HIGH_VOLATILITY` the strategy holds and preserves capital instead of entering.
 
@@ -153,6 +159,9 @@ Everything lives in `.env` (copy from `.env.example`). `config.py` validates it 
 
 ## Project structure
 
+<p align="center"><img src="docs/architecture.svg" alt="System architecture: market data flows through indicators, regime-aware strategy, and risk management into execution; the walk-forward optimizer feeds learned parameters back to the strategy; execution emits notifications; a safety boundary of four invariants guards the whole loop." width="920"></p>
+<p align="center"><em>The pipeline and its feedback loop. Each layer has one owner; the optimizer writes learned parameters back into the strategy, and a boundary of four safety invariants guards the loop.</em></p>
+
 ```
 trading-bot/
 ├── config.py                 # Config loading and validation
@@ -166,14 +175,17 @@ trading-bot/
 │   └── technicals.py         # EMA/RSI/ATR/BB/MACD/VWAP + regime classifier
 ├── strategy/
 │   ├── adaptive_strategy.py  # Regime-aware signal generation
-│   └── scanner.py            # Conviction ranking across the watchlist
+│   ├── scanner.py            # Conviction ranking across the watchlist
+│   └── macro_filter.py       # Macro-trend confluence filter
 ├── risk/
-│   └── risk_manager.py       # Volatility sizing, circuit breaker, trailing stops
+│   ├── risk_manager.py       # Volatility sizing, circuit breaker, trailing stops
+│   └── earnings_filter.py    # Earnings blackout / event-risk gate
 ├── optimizer/
 │   ├── backtester.py         # Sharpe, profit factor, drawdown, fitness
 │   └── self_improver.py      # Walk-forward optimiser and adoption gates
 ├── execution/
 │   ├── alpaca_broker.py      # Alpaca client + local paper simulator
+│   ├── trade_journal.py      # Trade journal (SQLite)
 │   └── webhook.py            # Telegram / Discord notifications
 └── tests/                    # Safety, optimizer, risk, wiring, integration
 ```

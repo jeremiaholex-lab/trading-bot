@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 472" width="980" height="472" role="img" aria-label="System architecture: market data flows through indicators, regime-aware strategy, and risk management into execution; the walk-forward optimizer feeds learned parameters back to the strategy; execution emits notifications; a safety boundary of four invariants guards the whole loop.">
+  <style>
+    svg {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      --card: #fcfcfb;
+      --cardborder: rgba(11,11,11,0.10);
+      --ink: #0b0b0b;
+      --ink2: #52514e;
+      --muted: #898781;
+      --line: #c3c2b7;
+      --arrow: #898781;
+      --b1: #2a78d6;
+      --b2: #6250d6;
+      --b3: #1baf7a;
+      --b4: #eb6834;
+      --b5: #e34948;
+      --b6: #2a78d6;
+      --b7: #e87ba4;
+      --safe: #0ca30c;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --card: #1a1a19;
+        --cardborder: rgba(255,255,255,0.10);
+        --ink: #f0efec;
+        --ink2: #c3c2b7;
+        --muted: #898781;
+        --line: #383835;
+        --arrow: #898781;
+        --b1: #3987e5;
+        --b2: #9085e9;
+        --b3: #199e70;
+        --b4: #d95926;
+        --b5: #e66767;
+        --b6: #3987e5;
+        --b7: #d55181;
+        --safe: #0ca30c;
+      }
+    }
+    .box { stroke-width: 1.5; }
+    .box .t { font-size: 15px; font-weight: 700; fill: var(--ink); }
+    .box .s { font-size: 11px; font-weight: 400; fill: var(--ink2); }
+    .flow { stroke: var(--arrow); stroke-width: 1.5; fill: none; }
+    .flowlabel { font-size: 11px; fill: var(--muted); font-weight: 500; }
+    .safety { stroke: var(--safe); stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+    .safetytext { font-size: 11.5px; fill: var(--ink2); font-weight: 500; }
+    .safetyhead { font-size: 11.5px; fill: var(--safe); font-weight: 700; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--arrow)"/>
+    </marker>
+  </defs>
+
+  <!-- Card background -->
+  <rect x="0.5" y="0.5" width="979" height="471" rx="14" fill="var(--card)" stroke="var(--cardborder)"/>
+
+  <!-- Main pipeline: row 1 -->
+  <g class="box">
+    <rect x="10" y="70" width="160" height="70" rx="9" fill="var(--b1)" fill-opacity="0.12" stroke="var(--b1)"/>
+    <text class="t" x="90" y="98" text-anchor="middle">Market Data</text>
+    <text class="s" x="90" y="117" text-anchor="middle">Alpaca · yfinance</text>
+  </g>
+  <line class="flow" x1="170" y1="105" x2="208" y2="105" marker-end="url(#ah)"/>
+  <text class="flowlabel" x="190" y="94" text-anchor="middle">OHLCV</text>
+
+  <g class="box">
+    <rect x="210" y="70" width="160" height="70" rx="9" fill="var(--b2)" fill-opacity="0.12" stroke="var(--b2)"/>
+    <text class="t" x="290" y="98" text-anchor="middle">Indicators</text>
+    <text class="s" x="290" y="117" text-anchor="middle">EMA·RSI·ATR·MACD·BB·VWAP</text>
+  </g>
+  <line class="flow" x1="370" y1="105" x2="408" y2="105" marker-end="url(#ah)"/>
+  <text class="flowlabel" x="390" y="94" text-anchor="middle">bars</text>
+
+  <g class="box">
+    <rect x="410" y="70" width="160" height="70" rx="9" fill="var(--b3)" fill-opacity="0.12" stroke="var(--b3)"/>
+    <text class="t" x="490" y="98" text-anchor="middle">Strategy + Regime</text>
+    <text class="s" x="490" y="117" text-anchor="middle">signals · conviction rank</text>
+  </g>
+  <line class="flow" x1="570" y1="105" x2="608" y2="105" marker-end="url(#ah)"/>
+  <text class="flowlabel" x="590" y="94" text-anchor="middle">entries</text>
+
+  <g class="box">
+    <rect x="610" y="70" width="160" height="70" rx="9" fill="var(--b4)" fill-opacity="0.12" stroke="var(--b4)"/>
+    <text class="t" x="690" y="98" text-anchor="middle">Risk Manager</text>
+    <text class="s" x="690" y="117" text-anchor="middle">ATR sizing · breaker · trail</text>
+  </g>
+  <line class="flow" x1="770" y1="105" x2="808" y2="105" marker-end="url(#ah)"/>
+  <text class="flowlabel" x="790" y="94" text-anchor="middle">orders</text>
+
+  <g class="box">
+    <rect x="810" y="70" width="160" height="70" rx="9" fill="var(--b5)" fill-opacity="0.12" stroke="var(--b5)"/>
+    <text class="t" x="890" y="98" text-anchor="middle">Execution</text>
+    <text class="s" x="890" y="117" text-anchor="middle">Alpaca · paper sim</text>
+  </g>
+
+  <!-- Optimizer feedback -->
+  <g class="box">
+    <rect x="410" y="262" width="160" height="70" rx="9" fill="var(--b6)" fill-opacity="0.12" stroke="var(--b6)"/>
+    <text class="t" x="490" y="290" text-anchor="middle">Optimizer</text>
+    <text class="s" x="490" y="309" text-anchor="middle">walk-forward, 3 gates</text>
+  </g>
+  <line class="flow" x1="490" y1="262" x2="490" y2="148" marker-end="url(#ah)"/>
+  <text class="flowlabel" x="500" y="205" text-anchor="start">learned params</text>
+
+  <!-- Notifications -->
+  <g class="box">
+    <rect x="810" y="262" width="160" height="70" rx="9" fill="var(--b7)" fill-opacity="0.12" stroke="var(--b7)"/>
+    <text class="t" x="890" y="290" text-anchor="middle">Notifications</text>
+    <text class="s" x="890" y="309" text-anchor="middle">Telegram · Discord</text>
+  </g>
+  <line class="flow" x1="890" y1="140" x2="890" y2="254" marker-end="url(#ah)"/>
+  <text class="flowlabel" x="900" y="200" text-anchor="start">fills · report</text>
+
+  <!-- Safety boundary -->
+  <rect class="safety" x="16" y="376" width="948" height="64" rx="9"/>
+  <text class="safetyhead" x="32" y="400">Safety invariants — never relaxed</text>
+  <text class="safetytext" x="32" y="422">Invalid credentials are fatal · Tests never place orders · Optimizer gates are absolute · No account number in git</text>
+</svg>
