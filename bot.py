@@ -758,6 +758,9 @@ class TradingBotOrchestrator:
         opt_table.add_column("Fitness Score", justify="right")
         opt_table.add_column("Tuned Parameters", style="dim")
 
+        # Benchmark for alpha scoring. Fetched once for the whole run.
+        benchmark_df = SelfImprover.fetch_benchmark(self.market_data)
+
         for sym in symbols:
             df = self.market_data.get_historical_bars(
                 sym,
@@ -768,7 +771,7 @@ class TradingBotOrchestrator:
                 opt_table.add_row(sym, "[yellow]Skipped[/yellow]", "-", "-", "-", "-", "No data")
                 continue
 
-            res = self.self_improver.optimize_symbol(sym, df)
+            res = self.self_improver.optimize_symbol(sym, df, benchmark_df=benchmark_df)
             if res.get("status") == "skipped":
                 opt_table.add_row(sym, "[yellow]Skipped[/yellow]", "-", "-", "-", "-", res.get("reason"))
                 continue
@@ -811,7 +814,14 @@ class TradingBotOrchestrator:
             return
 
         params = self.self_improver.get_symbol_params(symbol)
-        res = StrategyBacktester.run_backtest(df, params, symbol=symbol)
+        benchmark_df = SelfImprover.fetch_benchmark(self.market_data)
+        # The backtest trades from bar 50 (indicator warm-up) to the last bar.
+        benchmark_return_pct = SelfImprover._benchmark_return_pct(
+            benchmark_df, df.index[50], df.index[-1]
+        )
+        res = StrategyBacktester.run_backtest(
+            df, params, symbol=symbol, benchmark_return_pct=benchmark_return_pct
+        )
 
         bt_table = Table(title=f"📈 Quantitative Performance Report: {symbol}")
         bt_table.add_column("Metric", style="bold")
@@ -823,6 +833,7 @@ class TradingBotOrchestrator:
         bt_table.add_row("Win Rate", f"{res.win_rate:.1f}%")
         bt_table.add_row("Profit Factor", f"{res.profit_factor:.2f}")
         bt_table.add_row("Total Return", f"{res.total_pnl_pct:+.2f}%")
+        bt_table.add_row("Alpha vs Benchmark", f"{res.alpha_pct:+.2f}%")
         bt_table.add_row("Max Drawdown", f"{res.max_drawdown_pct:.2f}%")
         bt_table.add_row("Annualized Sharpe Ratio", f"{res.sharpe_ratio:.2f}")
         bt_table.add_row("Overall Fitness Score", f"{res.fitness_score:.2f}")

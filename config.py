@@ -139,6 +139,13 @@ class Config:
     # non-reproducibly.
     OPTIMIZER_SEED: int = int(os.getenv("OPTIMIZER_SEED", "42"))
 
+    # Benchmark used to score ALPHA (excess return) during optimisation.
+    # A self-improver that optimises RAW return mistakes riding a bull market
+    # for edge; scoring excess return over this benchmark keeps the optimizer
+    # tuned for genuine outperformance. Set to a broad market index for the
+    # universe being traded (SPY for US large caps).
+    BENCHMARK_SYMBOL: str = os.getenv("BENCHMARK_SYMBOL", "SPY").strip().upper()
+
     # State Storage
     STRATEGY_STATE_FILE: Path = BASE_DIR / "strategy_state.json"
     LOGS_DIR: Path = BASE_DIR / "logs"

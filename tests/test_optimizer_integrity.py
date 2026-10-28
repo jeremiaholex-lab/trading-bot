@@ -47,12 +47,15 @@ def _split_lengths(n):
     return split, n - split
 
 
-def _is_train_slice(df, n):
-    return len(df) == _split_lengths(n)[0]
+def _is_train_slice(df, n, **kwargs):
+    # The walk-forward now evaluates windows on the FULL frame, so a train
+    # call is identified by its window (bars 0..split), not by a sliced df.
+    return kwargs.get("start_idx", 50) == 0 and kwargs.get("end_idx") == _split_lengths(n)[0]
 
 
-def _is_test_slice(df, n):
-    return len(df) == _split_lengths(n)[1]
+def _is_test_slice(df, n, **kwargs):
+    # The held-out window starts at the split; end_idx is left unset.
+    return kwargs.get("start_idx", 50) == _split_lengths(n)[0]
 
 
 @pytest.fixture
@@ -87,7 +90,7 @@ def test_optimizer_does_not_adopt_a_test_only_winner(monkeypatch, sample_data, t
     n = len(sample_data)
 
     def rigged(df, params, symbol="TICKER", initial_capital=10000.0, **kwargs):
-        if _is_train_slice(df, n):
+        if _is_train_slice(df, n, **kwargs):
             if params.ema_fast == 13:
                 # Looks poor in-sample.
                 return _result(trades=12, wins=6, pnl=1.0, pf=1.1, dd=5.0, sharpe=0.4, fitness=2.0)
@@ -122,12 +125,12 @@ def test_optimizer_evaluates_the_test_slice_only_once(monkeypatch, sample_data, 
     calls = {"train": 0, "test": 0}
 
     def counting(df, params, symbol="TICKER", initial_capital=10000.0, **kwargs):
-        if _is_train_slice(df, n):
+        if _is_train_slice(df, n, **kwargs):
             calls["train"] += 1
             # Always healthy in-sample so the candidate loop is never
             # short-circuited before the held-out slice is reached.
             return _result(trades=12, wins=7, pnl=3.0, pf=1.3, dd=5.0, sharpe=0.8, fitness=1.5)
-        if _is_test_slice(df, n):
+        if _is_test_slice(df, n, **kwargs):
             calls["test"] += 1
             return _result(trades=12, wins=7, pnl=3.0, pf=1.3, dd=5.0, sharpe=0.8, fitness=1.5)
         return _result()
@@ -164,7 +167,7 @@ def test_optimizer_will_not_adopt_below_the_absolute_fitness_floor(monkeypatch, 
     def rigged(df, params, symbol="TICKER", initial_capital=10000.0, **kwargs):
         if _is_default(params):
             return _result(trades=12, wins=2, pnl=-30.0, pf=0.2, dd=60.0, sharpe=-3.0, fitness=-40.0)
-        if _is_train_slice(df, n):
+        if _is_train_slice(df, n, **kwargs):
             # Clears the in-sample gate.
             return _result(trades=12, wins=7, pnl=4.0, pf=1.6, dd=4.0, sharpe=0.9, fitness=5.0)
         # Out of sample it is a losing strategy -- but better than baseline.
@@ -187,7 +190,7 @@ def test_optimizer_will_not_adopt_on_a_thin_out_of_sample_sample(monkeypatch, sa
     def rigged(df, params, symbol="TICKER", initial_capital=10000.0, **kwargs):
         if _is_default(params):
             return _result(trades=30, wins=20, pnl=12.0, pf=2.0, dd=5.0, sharpe=1.5, fitness=8.0)
-        if _is_train_slice(df, n):
+        if _is_train_slice(df, n, **kwargs):
             # Strong in-sample: passes the training gates.
             return _result(trades=25, wins=16, pnl=10.0, pf=2.2, dd=4.0, sharpe=1.4, fitness=9.0)
         # Only 2 out-of-sample trades -- not enough to trust.
@@ -307,3 +310,51 @@ def test_backtester_reports_zero_sharpe_without_trades():
     assert result.total_trades == 0
     assert result.sharpe_ratio == 0.0
     assert result.fitness_score < 0, "a strategy that never trades must score badly"
+
+
+# ----------------------------------------------------------------------
+# Feature: alpha (excess-return) scoring. A self-improver that optimises
+# RAW return mistakes riding a bull market for edge. With a benchmark the
+# fitness must reward outperformance, not market beta.
+# ----------------------------------------------------------------------
+def test_backtester_alpha_defaults_to_raw_return_without_benchmark():
+    """No benchmark supplied -> alpha equals the raw return (backward compat)."""
+    df = _sawtooth_data(200)
+    res = StrategyBacktester.run_backtest(df, StrategyParameters(), symbol="SPY")
+    assert res.alpha_pct == res.total_pnl_pct, (
+        "without a benchmark, alpha must fall back to the raw return"
+    )
+
+
+def test_backtester_penalises_a_strategy_that_only_matches_the_benchmark():
+    """A strategy that exactly matches the benchmark must score ~zero alpha."""
+    df = _sawtooth_data(200)
+    raw = StrategyBacktester.run_backtest(df, StrategyParameters(), symbol="SPY")
+    matched = StrategyBacktester.run_backtest(
+        df, StrategyParameters(), symbol="SPY",
+        # Benchmark moved exactly with the strategy -> no edge.
+        benchmark_return_pct=raw.total_pnl_pct / 100.0,
+    )
+    assert matched.alpha_pct < raw.alpha_pct, (
+        "a strategy that only matched the benchmark must not score the full "
+        "raw return as edge"
+    )
+    assert abs(matched.alpha_pct) < 1.0, (
+        f"alpha should be ~0 when the benchmark matches the strategy "
+        f"(got {matched.alpha_pct})"
+    )
+
+
+def test_backtester_penalises_underperformance_against_a_strong_benchmark():
+    """When the benchmark beats the strategy, fitness must drop."""
+    df = _sawtooth_data(200)
+    raw = StrategyBacktester.run_backtest(df, StrategyParameters(), symbol="SPY")
+    underperformed = StrategyBacktester.run_backtest(
+        df, StrategyParameters(), symbol="SPY",
+        # Benchmark gained 5% more than the strategy over the window.
+        benchmark_return_pct=raw.total_pnl_pct / 100.0 + 0.05,
+    )
+    assert underperformed.fitness_score < raw.fitness_score, (
+        "underperforming a strong benchmark must reduce the fitness score"
+    )
+    assert underperformed.alpha_pct < 0, "alpha must be negative when the benchmark wins"
