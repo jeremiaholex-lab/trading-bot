@@ -1,10 +1,17 @@
 import pytest
+from config import Config
 from risk.risk_manager import RiskManager, PositionSizeResult
 from strategy.adaptive_strategy import TradeSignal
 
 @pytest.fixture
 def risk_mgr():
-    rm = RiskManager()
+    # The real EarningsFilter fetches live yfinance data (network). These
+    # tests are hermetic, so inject a no-op that never blocks. Earnings
+    # blackout behaviour is covered separately in test_advanced_risk_gates.py.
+    class _NoopEarnings:
+        def is_in_blackout(self, symbol, blackout_days=2, current_date=None):
+            return False, ""
+    rm = RiskManager(earnings_filter=_NoopEarnings())
     rm.update_start_of_day_equity(100000.0)
     return rm
 
@@ -76,3 +83,38 @@ def test_duplicate_holding_rejection(risk_mgr, sample_buy_signal):
     )
     assert res.allowed is False
     assert "already open" in res.rejection_reason
+
+def test_news_gate_blocks_trade(risk_mgr, sample_buy_signal, monkeypatch):
+    """The breaking-news gate rejects when the news filter reports risk."""
+    monkeypatch.setattr(Config, "ENABLE_NEWS_FILTER", True)
+
+    class BlockingNews:
+        def is_blocked(self, symbol, hours=None, important_only=None, now=None):
+            return True, "News risk (legal risk): probe opened"
+    risk_mgr.news_filter = BlockingNews()
+    res = risk_mgr.calculate_position_size(
+        signal=sample_buy_signal,
+        portfolio_equity=100000.0,
+        cash_available=80000.0,
+        current_open_positions_count=0,
+        already_holding_symbol=False
+    )
+    assert res.allowed is False
+    assert "News Risk" in res.rejection_reason
+
+def test_news_gate_allows_when_clear(risk_mgr, sample_buy_signal, monkeypatch):
+    """A clear news filter must not block a valid trade."""
+    monkeypatch.setattr(Config, "ENABLE_NEWS_FILTER", True)
+
+    class ClearNews:
+        def is_blocked(self, symbol, hours=None, important_only=None, now=None):
+            return False, ""
+    risk_mgr.news_filter = ClearNews()
+    res = risk_mgr.calculate_position_size(
+        signal=sample_buy_signal,
+        portfolio_equity=100000.0,
+        cash_available=80000.0,
+        current_open_positions_count=0,
+        already_holding_symbol=False
+    )
+    assert res.allowed is True

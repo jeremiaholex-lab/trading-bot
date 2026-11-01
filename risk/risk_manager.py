@@ -4,6 +4,8 @@ from typing import Optional, Dict, Tuple, Any, List
 from config import Config
 from strategy.adaptive_strategy import TradeSignal
 from .earnings_filter import EarningsFilter
+from .news_filter import NewsFilter
+from .congress_filter import CongressFilter
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +28,22 @@ class RiskManager:
     6. Trailing stops and profit protection
     """
 
-    def __init__(self, earnings_filter: Optional[EarningsFilter] = None):
+    def __init__(
+        self,
+        earnings_filter: Optional[EarningsFilter] = None,
+        news_filter: Optional[NewsFilter] = None,
+        congress_filter: Optional[CongressFilter] = None,
+    ):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
         self.daily_drawdown_limit = Config.DAILY_DRAWDOWN_LIMIT
         self.start_of_day_equity: Optional[float] = None
         self.circuit_breaker_tripped: bool = False
         self.earnings_filter = earnings_filter or EarningsFilter()
+        self.news_filter = news_filter or NewsFilter(
+            sec_user_agent=getattr(Config, "SEC_USER_AGENT", "")
+        )
+        self.congress_filter = congress_filter or CongressFilter()
 
     def update_start_of_day_equity(self, current_equity: float):
         """Initializes or resets the benchmark equity for the trading day."""
@@ -143,6 +154,29 @@ class RiskManager:
                     rejection_reason=f"Earnings Blackout: {earnings_reason}."
                 )
 
+        # 5b. Breaking-News / Event-Risk Guard
+        # Blocks entries on material event risk (important SEC 8-K filings,
+        # risk-keyword headlines) within the lookback window. A fetch failure
+        # never blocks: the filter logs and allows, so an outage cannot halt
+        # trading on a false positive.
+        if Config.ENABLE_NEWS_FILTER and self.news_filter:
+            news_blocked, news_reason = self.news_filter.is_blocked(
+                signal.symbol,
+                hours=Config.NEWS_BLACKOUT_HOURS,
+                important_only=Config.NEWS_IMPORTANT_ONLY,
+            )
+            if news_blocked:
+                logger.warning(
+                    "News gate blocked %s: %s", signal.symbol, news_reason
+                )
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"News Risk: {news_reason}."
+                )
+
         # 6. Minimum confidence filter
         if signal.confidence < 0.60:
             return PositionSizeResult(
@@ -242,3 +276,29 @@ class RiskManager:
         new_stop = max(new_stop, current_stop)
 
         return round(new_stop, 2)
+
+    def log_congress_advisories(self, symbols: Optional[List[str]] = None):
+        """Logs fresh congressional STOCK Act disclosures touching the watchlist.
+
+        Advisory only (an alpha signal, never a block) and off by default.
+        Fails soft: a congressional-data outage is logged and ignored.
+        """
+        if not getattr(Config, "ENABLE_CONGRESS_WATCH", False):
+            return
+        if not symbols:
+            symbols = Config.WATCHLIST
+        try:
+            matches = self.congress_filter.recent_trades(
+                symbols,
+                since_days=getattr(Config, "CONGRESS_SINCE_DAYS", 45),
+            )
+        except Exception as exc:
+            logger.warning("Congress watch failed (%s); skipping", exc)
+            return
+        for m in matches:
+            logger.info(
+                "Congress disclosure: %s (%s) traded %s on %s — doc %s %s",
+                m.get("member", "?"), m.get("district", "?"),
+                ", ".join(m.get("matched_tickers", m.get("tickers", []))),
+                m.get("filed", "?"), m.get("doc_id", "?"), m.get("url", ""),
+            )

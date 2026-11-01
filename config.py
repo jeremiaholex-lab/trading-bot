@@ -77,6 +77,27 @@ class Config:
     ENABLE_EARNINGS_FILTER: bool = os.getenv("ENABLE_EARNINGS_FILTER", "True").lower() in ("true", "1", "yes")
     EARNINGS_BLACKOUT_DAYS: int = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
 
+    # Breaking-News / Event-Risk Gate
+    #
+    # Blocks entries when a symbol has material event risk: an important SEC
+    # 8-K filing (bankruptcy, earnings results, delisting, auditor change...)
+    # or a risk-keyword headline within the lookback window. The data comes
+    # from free feeds (Yahoo headline RSS, SEC EDGAR). A feed outage logs a
+    # warning and allows the trade rather than halting trading on a false
+    # positive. Set NEWS_IMPORTANT_ONLY=False to block on any headline.
+    ENABLE_NEWS_FILTER: bool = os.getenv("ENABLE_NEWS_FILTER", "True").lower() in ("true", "1", "yes")
+    NEWS_BLACKOUT_HOURS: float = float(os.getenv("NEWS_BLACKOUT_HOURS", "24"))
+    NEWS_IMPORTANT_ONLY: bool = os.getenv("NEWS_IMPORTANT_ONLY", "True").lower() in ("true", "1", "yes")
+    # SEC EDGAR requires a User-Agent naming you ("Your Name you@example.com").
+    # Without one the news gate reads headlines only and skips SEC filings.
+    SEC_USER_AGENT: str = os.getenv("SEC_USER_AGENT", "").strip()
+
+    # Congressional STOCK Act disclosure watch (advisory, off by default).
+    # Logs fresh congressional trades in watchlist tickers. Needs pdftotext
+    # (poppler) to map a filing to its tickers; never blocks a trade.
+    ENABLE_CONGRESS_WATCH: bool = os.getenv("ENABLE_CONGRESS_WATCH", "False").lower() in ("true", "1", "yes")
+    CONGRESS_SINCE_DAYS: int = int(os.getenv("CONGRESS_SINCE_DAYS", "45"))
+
     # Macro Market Trend Confluence Filter
     ENABLE_MACRO_TREND_FILTER: bool = os.getenv("ENABLE_MACRO_TREND_FILTER", "True").lower() in ("true", "1", "yes")
     MACRO_BENCHMARK_SYMBOLS: list = ["SPY", "QQQ"]
@@ -207,6 +228,13 @@ class Config:
         # Validate earnings blackout days
         if cls.EARNINGS_BLACKOUT_DAYS < 0:
             errors.append(f"EARNINGS_BLACKOUT_DAYS must be >= 0 (got {cls.EARNINGS_BLACKOUT_DAYS})")
+
+        # Validate news gate
+        if cls.NEWS_BLACKOUT_HOURS < 0:
+            errors.append(f"NEWS_BLACKOUT_HOURS must be >= 0 (got {cls.NEWS_BLACKOUT_HOURS})")
+
+        if cls.CONGRESS_SINCE_DAYS < 1:
+            errors.append(f"CONGRESS_SINCE_DAYS must be >= 1 (got {cls.CONGRESS_SINCE_DAYS})")
 
         # Validate partial profit taking
         if not (0.0 < cls.SCALE_OUT_PERCENT < 1.0):

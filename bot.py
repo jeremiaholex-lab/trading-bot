@@ -451,6 +451,14 @@ class TradingBotOrchestrator:
             except Exception as e:
                 logger.warning(f"Macro market evaluation error: {e}")
 
+        # Congressional STOCK Act disclosure watch (advisory, off by default).
+        # Logs fresh congressional trades in watchlist tickers; never blocks.
+        if getattr(Config, "ENABLE_CONGRESS_WATCH", False):
+            try:
+                self.risk_mgr.log_congress_advisories(universe)
+            except Exception as e:
+                logger.warning(f"Congress advisory check failed: {e}")
+
         # Rank by conviction; the highest-scoring symbols are considered first.
         conviction_order = list(universe)
         conviction_scores = {}
