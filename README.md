@@ -63,8 +63,14 @@ This separation is not cosmetic. Alpaca serves only ~1,534 bars of 15-minute his
 **Institutional risk management**
 - *Volatility sizing*: no trade risks more than 1.5% of equity, sized from Average True Range.
 - *Server-side bracket orders*: every entry attaches an OCO stop-loss and take-profit.
-- *Trailing stops* on positions that have run up, cancelling the old stop before submitting the replacement.
+- *Trailing stops* amend the existing protective stop when supported, rather than canceling it before a replacement.
 - *Daily circuit breaker*: halts new entries when the day's drawdown hits 3%.
+
+**Layered execution safety** — new entries are checked against a local mandate (symbol allow/deny lists, order and daily notional limits, daily order counts, and position/sector concentration) before broker submission. Its leverage check compares the proposed order notional with equity; it is not a full portfolio-margin calculation. The paper/live boundary checks the client’s configured mode against the expected profile; verify the broker account in its own dashboard before enabling live trading. A restart-persistent filesystem kill switch blocks new entries but does **not** automatically flatten open positions; exits remain available so the operator can reduce risk.
+
+**Tamper-evident audit trail** — order submissions and rejections, mandate decisions, kill-switch changes, and selected risk events are written to a SHA-256 hash-chained ledger. `AuditLedger.verify_chain()` checks the ledger’s internal links and detects edits or gaps when later entries remain. Local ledger files are not immutable storage; truncating the tail or deleting the entire ledger requires an external backup/checkpoint to detect, so protect and back up the state directory.
+
+**Optional pre-trade advisory** — an HTTP advisory provider can return observations about an order and account context. It is disabled by default and **fail-open / observational only**: an unavailable service or a reject verdict does not prevent a mandate-compliant order. It is not a replacement for the local structural risk gates.
 
 **Self-improving optimizer** — walk-forward validation (70/30 split), the held-out slice scored exactly once on the training-phase winner, seeded for reproducibility, persisted per ticker in `strategy_state.json`.
 
@@ -150,6 +156,24 @@ Everything lives in `.env` (copy from `.env.example`). `config.py` validates it 
 | `MIN_TRADES_TO_ADOPT` | `3` | Minimum out-of-sample trades to trust a result |
 | `MIN_FITNESS_IMPROVEMENT` | `0.25` | Required margin over the parameters in use |
 | `OPTIMIZER_SEED` | `42` | Makes the search reproducible |
+| `MANDATE_MAX_NOTIONAL_PER_ORDER` | `50000.0` | Maximum USD notional for a single entry |
+| `MANDATE_MAX_NOTIONAL_PER_SYMBOL` | `100000.0` | Maximum daily entry notional per symbol |
+| `MANDATE_MAX_DAILY_NOTIONAL_USD` | `500000.0` | Maximum aggregate daily entry notional |
+| `MANDATE_MAX_LEVERAGE` | `2.0` | Maximum projected leverage |
+| `MANDATE_MAX_DAILY_ORDERS` | `100` | Maximum submitted orders per day |
+| `MANDATE_MAX_DAILY_TRADES` | `50` | Maximum fills per day |
+| `MANDATE_MAX_POSITION_CONCENTRATION` | `0.25` | Maximum equity fraction in one symbol |
+| `MANDATE_MAX_SECTOR_CONCENTRATION` | `0.40` | Maximum equity fraction in one sector |
+| `MANDATE_MIN_ACCOUNT_EQUITY` | `1000.0` | Minimum equity allowed for new entries |
+| `MANDATE_EXPECTED_ACCOUNT_MODE` | `paper` or `live` | Expected broker mode; defaults from `ALPACA_LIVE` |
+| `MANDATE_EXTRA_ALLOWED_SYMBOLS` | – | Comma-separated additions to the watchlist universe |
+| `MANDATE_DENIED_SYMBOLS` | – | Comma-separated symbols always denied by the mandate |
+| `ENABLE_PAPER_LIVE_BOUNDARY` | `True` | Verify configured broker account mode before orders |
+| `ADVISORY_ENABLED` | `False` | Enable optional observational HTTP pre-trade reviews |
+| `ADVISORY_TIMEOUT_MS` | `150.0` | Per-provider advisory timeout in milliseconds |
+| `ADVISORY_1_ENDPOINT` | – | First advisory provider URL; required only when advisory is enabled |
+| `ADVISORY_1_API_KEY` | – | Optional bearer token for the first advisory provider |
+| `ADVISORY_1_TIMEOUT_MS` | `150` | HTTP request timeout for the first advisory provider |
 | `TELEGRAM_BOT_TOKEN` | – | Telegram bot token for notifications |
 | `TELEGRAM_CHAT_ID` | – | Chat that receives them |
 | `DISCORD_WEBHOOK_URL` | – | Discord webhook for notifications |
@@ -180,6 +204,13 @@ trading-bot/
 ├── risk/
 │   ├── risk_manager.py       # Volatility sizing, circuit breaker, trailing stops
 │   └── earnings_filter.py    # Earnings blackout / event-risk gate
+├── safety/
+│   ├── mandate_gate.py        # Structural pre-trade limits and symbol universe
+│   ├── kill_switch.py         # Restart-persistent entry halt (no auto-flatten)
+│   ├── audit_ledger.py        # Hash-chained, verifiable event log
+│   ├── paper_live_boundary.py # Configured broker-mode and connector limit checks
+│   ├── advisory.py            # Optional observational advisory interface
+│   └── http_advisory.py       # External HTTP advisory provider
 ├── optimizer/
 │   ├── backtester.py         # Sharpe, profit factor, drawdown, fitness
 │   └── self_improver.py      # Walk-forward optimiser and adoption gates
@@ -200,9 +231,10 @@ Each layer has exactly one owner. A change to what the bot buys belongs in `stra
 python -m pytest                          # whole suite
 python -m pytest -v                       # verbose
 python -m pytest tests/test_optimizer_integrity.py
+python -m pytest tests/test_safety_integration.py
 ```
 
-The suite is hermetic: no network, no orders. That is enforced, not assumed — `tests/test_safety.py` collects the suite in a subprocess and fails if importing anything executes the trading loop.
+The suite is hermetic: no network, no orders. That is enforced, not assumed — `tests/test_safety.py` collects the suite in a subprocess and fails if importing anything executes the trading loop. The safety integration tests also cover mandate limits, kill-switch persistence, audit-chain verification, advisory behavior, and paper/live boundary checks.
 
 ---
 
