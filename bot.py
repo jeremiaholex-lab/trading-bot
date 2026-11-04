@@ -1045,3 +1045,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+        # Expose safety infrastructure from broker for risk manager and other components
+        self.kill_switch = self.broker.kill_switch
+        self.audit_ledger = self.broker.audit_ledger
+        self.mandate_gate = self.broker.mandate_gate
+        self.advisory_orchestrator = self.broker.advisory_orchestrator
+
+        # Pass safety infrastructure to risk manager
+        self.risk_mgr.kill_switch = self.kill_switch
+        self.risk_mgr.audit_ledger = self.audit_ledger
+        self.risk_mgr.mandate_gate = self.mandate_gate

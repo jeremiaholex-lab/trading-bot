@@ -7,6 +7,9 @@ from .earnings_filter import EarningsFilter
 from .news_filter import NewsFilter
 from .congress_filter import CongressFilter
 
+# Safety infrastructure
+from safety import KillSwitch, AuditLedger, MandateGate
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -26,6 +29,11 @@ class RiskManager:
     4. Binary event & earnings blackout guards
     5. Daily drawdown circuit breaker
     6. Trailing stops and profit protection
+
+    Now integrates with Vibe-Trading inspired safety infrastructure:
+    - Kill Switch: Emergency halt
+    - Audit Ledger: Immutable audit trail
+    - Mandate Gate: Structural compliance (delegates to broker's mandate gate)
     """
 
     def __init__(
@@ -33,6 +41,9 @@ class RiskManager:
         earnings_filter: Optional[EarningsFilter] = None,
         news_filter: Optional[NewsFilter] = None,
         congress_filter: Optional[CongressFilter] = None,
+        kill_switch: Optional[KillSwitch] = None,
+        audit_ledger: Optional[AuditLedger] = None,
+        mandate_gate: Optional[MandateGate] = None,
     ):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
@@ -44,6 +55,11 @@ class RiskManager:
             sec_user_agent=getattr(Config, "SEC_USER_AGENT", "")
         )
         self.congress_filter = congress_filter or CongressFilter()
+
+        # Safety infrastructure references (set by orchestrator)
+        self.kill_switch = kill_switch
+        self.audit_ledger = audit_ledger
+        self.mandate_gate = mandate_gate
 
     def update_start_of_day_equity(self, current_equity: float):
         """Initializes or resets the benchmark equity for the trading day."""
@@ -89,8 +105,32 @@ class RiskManager:
             Risk Per Share = Entry Price - Stop Loss Price
             Target Shares = Max Risk $ / Risk Per Share
         """
+        # 0. Kill Switch check - absolute override
+        if self.kill_switch and self.kill_switch.is_active():
+            if self.audit_ledger:
+                self.audit_ledger.log_risk_event(
+                    event_type="kill_switch_block",
+                    message=f"Order blocked by active kill switch: {signal.symbol}",
+                    symbol=signal.symbol,
+                    context={'side': 'buy', 'signal_confidence': signal.confidence},
+                )
+            return PositionSizeResult(
+                allowed=False,
+                shares=0,
+                cost=0.0,
+                risk_amount=0.0,
+                rejection_reason="Kill switch active - all new entries blocked."
+            )
+
         # 1. Circuit breaker check
         if self.check_circuit_breaker(portfolio_equity):
+            if self.audit_ledger:
+                self.audit_ledger.log_risk_event(
+                    event_type="circuit_breaker_block",
+                    message=f"Order blocked by circuit breaker: {signal.symbol}",
+                    symbol=signal.symbol,
+                    context={'drawdown_pct': (self.start_of_day_equity - portfolio_equity) / self.start_of_day_equity * 100},
+                )
             return PositionSizeResult(
                 allowed=False,
                 shares=0,
@@ -146,6 +186,13 @@ class RiskManager:
                 signal.symbol, blackout_days=Config.EARNINGS_BLACKOUT_DAYS
             )
             if in_blackout:
+                if self.audit_ledger:
+                    self.audit_ledger.log_risk_event(
+                        event_type="earnings_blackout_block",
+                        message=f"Order blocked by earnings blackout: {signal.symbol}",
+                        symbol=signal.symbol,
+                        context={'reason': earnings_reason},
+                    )
                 return PositionSizeResult(
                     allowed=False,
                     shares=0,
@@ -169,6 +216,13 @@ class RiskManager:
                 logger.warning(
                     "News gate blocked %s: %s", signal.symbol, news_reason
                 )
+                if self.audit_ledger:
+                    self.audit_ledger.log_risk_event(
+                        event_type="news_gate_block",
+                        message=f"Order blocked by news gate: {signal.symbol}",
+                        symbol=signal.symbol,
+                        context={'reason': news_reason},
+                    )
                 return PositionSizeResult(
                     allowed=False,
                     shares=0,
@@ -237,6 +291,21 @@ class RiskManager:
             )
 
         actual_risk_dollars = target_shares * risk_per_share
+
+        # Log successful risk check
+        if self.audit_ledger:
+            self.audit_ledger.log_risk_event(
+                event_type="position_size_calculated",
+                message=f"Position size calculated for {signal.symbol}: {target_shares} shares",
+                symbol=signal.symbol,
+                context={
+                    'target_shares': target_shares,
+                    'total_cost': total_cost,
+                    'risk_amount': actual_risk_dollars,
+                    'entry_price': entry,
+                    'stop_loss': stop_loss,
+                },
+            )
 
         return PositionSizeResult(
             allowed=True,

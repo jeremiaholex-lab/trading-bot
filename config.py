@@ -287,3 +287,31 @@ class Config:
 
 # Ensure logs directory exists
 Config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    # ===== SAFETY INFRASTRUCTURE (Vibe-Trading inspired) =====
+
+    # Mandate Gate Configuration
+    MANDATE_MAX_NOTIONAL_PER_ORDER: float = float(os.getenv("MANDATE_MAX_NOTIONAL_PER_ORDER", "50000.0"))
+    MANDATE_MAX_NOTIONAL_PER_SYMBOL: float = float(os.getenv("MANDATE_MAX_NOTIONAL_PER_SYMBOL", "100000.0"))
+    MANDATE_MAX_DAILY_NOTIONAL_USD: float = float(os.getenv("MANDATE_MAX_DAILY_NOTIONAL_USD", "500000.0"))
+    MANDATE_MAX_LEVERAGE: float = float(os.getenv("MANDATE_MAX_LEVERAGE", "2.0"))
+    MANDATE_MAX_DAILY_ORDERS: int = int(os.getenv("MANDATE_MAX_DAILY_ORDERS", "100"))
+    MANDATE_MAX_DAILY_TRADES: int = int(os.getenv("MANDATE_MAX_DAILY_TRADES", "50"))
+    MANDATE_MAX_POSITION_CONCENTRATION: float = float(os.getenv("MANDATE_MAX_POSITION_CONCENTRATION", "0.25"))
+    MANDATE_MAX_SECTOR_CONCENTRATION: float = float(os.getenv("MANDATE_MAX_SECTOR_CONCENTRATION", "0.40"))
+    MANDATE_MIN_ACCOUNT_EQUITY: float = float(os.getenv("MANDATE_MIN_ACCOUNT_EQUITY", "1000.0"))
+    MANDATE_EXPECTED_ACCOUNT_MODE: str = os.getenv(
+        "MANDATE_EXPECTED_ACCOUNT_MODE", "live" if ALPACA_LIVE else "paper"
+    ).strip().lower()
+    MANDATE_EXTRA_ALLOWED_SYMBOLS: str = os.getenv("MANDATE_EXTRA_ALLOWED_SYMBOLS", "").strip()
+    MANDATE_DENIED_SYMBOLS: str = os.getenv("MANDATE_DENIED_SYMBOLS", "").strip()
+
+    # Kill Switch Configuration
+    KILL_SWITCH_SENTINEL_PATH: Path = BASE_DIR / "kill_switch.sentinel"
+    KILL_SWITCH_STATE_PATH: Path = BASE_DIR / "kill_switch_state.json"
+
+    # Advisory Configuration (opt-in)
+    ADVISORY_ENABLED: bool = os.getenv("ADVISORY_ENABLED", "False").lower() in ("true", "1", "yes")
+    ADVISORY_TIMEOUT_MS: float = float(os.getenv("ADVISORY_TIMEOUT_MS", "150.0"))
+
+    # Paper/Live Boundary
+    ENABLE_PAPER_LIVE_BOUNDARY: bool = os.getenv("ENABLE_PAPER_LIVE_BOUNDARY", "True").lower() in ("true", "1", "yes")
