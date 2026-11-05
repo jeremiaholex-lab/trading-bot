@@ -16,7 +16,7 @@ class TradeJournal:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or (Config.BASE_DIR / "trades.db")
+        self.db_path = db_path or Config.TRADES_DB_PATH
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:

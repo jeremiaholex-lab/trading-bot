@@ -4,18 +4,31 @@ from dotenv import load_dotenv
 
 # Base Directory
 BASE_DIR = Path(__file__).resolve().parent
+BOT_PROFILE = os.getenv("BOT_PROFILE", "primary").strip().lower()
+if BOT_PROFILE not in {"primary", "secondary"}:
+    raise ValueError(f"Unknown BOT_PROFILE: {BOT_PROFILE!r}")
 
-# Load environment variables
-env_file = BASE_DIR / ".env"
+if BOT_PROFILE == "secondary":
+    for key in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ALPACA_LIVE"):
+        os.environ.pop(key, None)
+
+env_file = Path(os.getenv(
+    "BOT_ENV_FILE",
+    BASE_DIR / (".env" if BOT_PROFILE == "primary" else ".env.secondary"),
+))
 if env_file.exists():
     load_dotenv(env_file)
-else:
-    # Also attempt loading from default environment
+elif BOT_PROFILE == "primary":
     load_dotenv()
 
 class Config:
     """Central configuration for Trading Bot."""
     BASE_DIR: Path = BASE_DIR
+    BOT_PROFILE: str = BOT_PROFILE
+    STATE_DIR: Path = Path(os.getenv(
+        "BOT_STATE_DIR",
+        BASE_DIR if BOT_PROFILE == "primary" else BASE_DIR / "runtime" / BOT_PROFILE,
+    ))
 
     # Alpaca API Credentials - must come from the environment (.env), never hardcode them here.
     ALPACA_API_KEY: str = os.getenv("ALPACA_API_KEY", "").strip()
@@ -26,7 +39,10 @@ class Config:
     # start rather than silently downgrading to the local simulator. A silent
     # downgrade looks exactly like "trading" while placing no orders at all.
     # Set to True only if you deliberately want simulator mode with bad keys.
-    ALLOW_SIMULATOR_FALLBACK: bool = os.getenv("ALLOW_SIMULATOR_FALLBACK", "False").lower() in ("true", "1", "yes")
+    ALLOW_SIMULATOR_FALLBACK: bool = (
+        BOT_PROFILE == "primary"
+        and os.getenv("ALLOW_SIMULATOR_FALLBACK", "False").lower() in ("true", "1", "yes")
+    )
 
     # Endpoints
     PAPER_BASE_URL: str = "https://paper-api.alpaca.markets"
@@ -160,6 +176,35 @@ class Config:
     # non-reproducibly.
     OPTIMIZER_SEED: int = int(os.getenv("OPTIMIZER_SEED", "42"))
 
+    # ===== SAFETY INFRASTRUCTURE (Vibe-Trading inspired) =====
+
+    # Mandate Gate Configuration
+    MANDATE_MAX_NOTIONAL_PER_ORDER: float = float(os.getenv("MANDATE_MAX_NOTIONAL_PER_ORDER", "50000.0"))
+    MANDATE_MAX_NOTIONAL_PER_SYMBOL: float = float(os.getenv("MANDATE_MAX_NOTIONAL_PER_SYMBOL", "100000.0"))
+    MANDATE_MAX_DAILY_NOTIONAL_USD: float = float(os.getenv("MANDATE_MAX_DAILY_NOTIONAL_USD", "500000.0"))
+    MANDATE_MAX_LEVERAGE: float = float(os.getenv("MANDATE_MAX_LEVERAGE", "2.0"))
+    MANDATE_MAX_DAILY_ORDERS: int = int(os.getenv("MANDATE_MAX_DAILY_ORDERS", "100"))
+    MANDATE_MAX_DAILY_TRADES: int = int(os.getenv("MANDATE_MAX_DAILY_TRADES", "50"))
+    MANDATE_MAX_POSITION_CONCENTRATION: float = float(os.getenv("MANDATE_MAX_POSITION_CONCENTRATION", "0.25"))
+    MANDATE_MAX_SECTOR_CONCENTRATION: float = float(os.getenv("MANDATE_MAX_SECTOR_CONCENTRATION", "0.40"))
+    MANDATE_MIN_ACCOUNT_EQUITY: float = float(os.getenv("MANDATE_MIN_ACCOUNT_EQUITY", "1000.0"))
+    MANDATE_EXPECTED_ACCOUNT_MODE: str = os.getenv(
+        "MANDATE_EXPECTED_ACCOUNT_MODE", "live" if ALPACA_LIVE else "paper"
+    ).strip().lower()
+    MANDATE_EXTRA_ALLOWED_SYMBOLS: str = os.getenv("MANDATE_EXTRA_ALLOWED_SYMBOLS", "").strip()
+    MANDATE_DENIED_SYMBOLS: str = os.getenv("MANDATE_DENIED_SYMBOLS", "").strip()
+
+    # Kill Switch Configuration
+    KILL_SWITCH_SENTINEL_PATH: Path = BASE_DIR / "kill_switch.sentinel"
+    KILL_SWITCH_STATE_PATH: Path = BASE_DIR / "kill_switch_state.json"
+
+    # Advisory Configuration (opt-in)
+    ADVISORY_ENABLED: bool = os.getenv("ADVISORY_ENABLED", "False").lower() in ("true", "1", "yes")
+    ADVISORY_TIMEOUT_MS: float = float(os.getenv("ADVISORY_TIMEOUT_MS", "150.0"))
+
+    # Paper/Live Boundary
+    ENABLE_PAPER_LIVE_BOUNDARY: bool = os.getenv("ENABLE_PAPER_LIVE_BOUNDARY", "True").lower() in ("true", "1", "yes")
+
     # Benchmark used to score ALPHA (excess return) during optimisation.
     # A self-improver that optimises RAW return mistakes riding a bull market
     # for edge; scoring excess return over this benchmark keeps the optimizer
@@ -168,8 +213,11 @@ class Config:
     BENCHMARK_SYMBOL: str = os.getenv("BENCHMARK_SYMBOL", "SPY").strip().upper()
 
     # State Storage
-    STRATEGY_STATE_FILE: Path = BASE_DIR / "strategy_state.json"
-    LOGS_DIR: Path = BASE_DIR / "logs"
+    STRATEGY_STATE_FILE: Path = STATE_DIR / "strategy_state.json"
+    TRADES_DB_PATH: Path = STATE_DIR / "trades.db"
+    SIMULATOR_STATE_FILE: Path = STATE_DIR / "simulator_state.json"
+    HEARTBEAT_PATH: Path = STATE_DIR / "bot_heartbeat.json"
+    LOGS_DIR: Path = STATE_DIR / "logs"
 
     @classmethod
     def has_alpaca_credentials(cls) -> bool:
@@ -200,6 +248,10 @@ class Config:
         # Check credentials for live trading
         if cls.ALPACA_LIVE and (not cls.has_alpaca_credentials()):
             errors.append("Valid ALPACA_API_KEY and ALPACA_SECRET_KEY are required when ALPACA_LIVE is True")
+        if cls.BOT_PROFILE == "secondary" and cls.ALPACA_LIVE:
+            errors.append("secondary profile must use Alpaca paper mode")
+        if cls.BOT_PROFILE == "secondary" and not cls.has_alpaca_credentials():
+            errors.append("secondary profile requires Alpaca credentials")
 
         # Validate risk percentage (0 < risk <= 5%)
         if not (0 < cls.MAX_PORTFOLIO_RISK_PER_TRADE <= 0.05):
@@ -285,33 +337,6 @@ class Config:
         if errors:
             raise ValueError(f"Configuration validation failed:\n - " + "\n - ".join(errors))
 
-# Ensure logs directory exists
+# Ensure state and logs directories exist
+Config.STATE_DIR.mkdir(parents=True, exist_ok=True)
 Config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    # ===== SAFETY INFRASTRUCTURE (Vibe-Trading inspired) =====
-
-    # Mandate Gate Configuration
-    MANDATE_MAX_NOTIONAL_PER_ORDER: float = float(os.getenv("MANDATE_MAX_NOTIONAL_PER_ORDER", "50000.0"))
-    MANDATE_MAX_NOTIONAL_PER_SYMBOL: float = float(os.getenv("MANDATE_MAX_NOTIONAL_PER_SYMBOL", "100000.0"))
-    MANDATE_MAX_DAILY_NOTIONAL_USD: float = float(os.getenv("MANDATE_MAX_DAILY_NOTIONAL_USD", "500000.0"))
-    MANDATE_MAX_LEVERAGE: float = float(os.getenv("MANDATE_MAX_LEVERAGE", "2.0"))
-    MANDATE_MAX_DAILY_ORDERS: int = int(os.getenv("MANDATE_MAX_DAILY_ORDERS", "100"))
-    MANDATE_MAX_DAILY_TRADES: int = int(os.getenv("MANDATE_MAX_DAILY_TRADES", "50"))
-    MANDATE_MAX_POSITION_CONCENTRATION: float = float(os.getenv("MANDATE_MAX_POSITION_CONCENTRATION", "0.25"))
-    MANDATE_MAX_SECTOR_CONCENTRATION: float = float(os.getenv("MANDATE_MAX_SECTOR_CONCENTRATION", "0.40"))
-    MANDATE_MIN_ACCOUNT_EQUITY: float = float(os.getenv("MANDATE_MIN_ACCOUNT_EQUITY", "1000.0"))
-    MANDATE_EXPECTED_ACCOUNT_MODE: str = os.getenv(
-        "MANDATE_EXPECTED_ACCOUNT_MODE", "live" if ALPACA_LIVE else "paper"
-    ).strip().lower()
-    MANDATE_EXTRA_ALLOWED_SYMBOLS: str = os.getenv("MANDATE_EXTRA_ALLOWED_SYMBOLS", "").strip()
-    MANDATE_DENIED_SYMBOLS: str = os.getenv("MANDATE_DENIED_SYMBOLS", "").strip()
-
-    # Kill Switch Configuration
-    KILL_SWITCH_SENTINEL_PATH: Path = BASE_DIR / "kill_switch.sentinel"
-    KILL_SWITCH_STATE_PATH: Path = BASE_DIR / "kill_switch_state.json"
-
-    # Advisory Configuration (opt-in)
-    ADVISORY_ENABLED: bool = os.getenv("ADVISORY_ENABLED", "False").lower() in ("true", "1", "yes")
-    ADVISORY_TIMEOUT_MS: float = float(os.getenv("ADVISORY_TIMEOUT_MS", "150.0"))
-
-    # Paper/Live Boundary
-    ENABLE_PAPER_LIVE_BOUNDARY: bool = os.getenv("ENABLE_PAPER_LIVE_BOUNDARY", "True").lower() in ("true", "1", "yes")

@@ -7,6 +7,18 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, TypeVar
 from config import Config
 
+# Safety infrastructure imports
+from safety import (
+    MandateGate,
+    MandateContext,
+    KillSwitch,
+    AuditLedger,
+    PaperLiveBoundary,
+    AccountMode,
+    AdvisoryOrchestrator,
+    AdvisoryVerdict,
+)
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -82,7 +94,19 @@ class BrokerAuthenticationError(RuntimeError):
 class AlpacaBroker:
     """
     Unified broker client for Alpaca (Live/Paper) with zero-config Local Simulator fallback.
+    Includes Vibe-Trading inspired safety infrastructure:
+    - Mandate Gate: Structural pre-trade compliance
+    - Kill Switch: Emergency halt with filesystem sentinel
+    - Audit Ledger: Hash-chained immutable audit trail
+    - Paper/Live Boundary: Structural mode separation
     """
+
+    # Class-level defaults so attributes always exist even if __init__ is interrupted
+    paper_live_boundary: Optional[PaperLiveBoundary] = None
+    kill_switch: Optional[KillSwitch] = None
+    mandate_gate: Optional[MandateGate] = None
+    audit_ledger: Optional[AuditLedger] = None
+    advisory_orchestrator: Optional[AdvisoryOrchestrator] = None
 
     def __init__(self, force_simulator: bool = False, state_file: Optional[Path] = None):
         self.client = None
@@ -110,8 +134,75 @@ class AlpacaBroker:
         # wipe open positions. Previously cash and positions lived only in
         # memory, so every restart reset the account to $100,000 while the
         # bot kept its tuned strategy parameters.
-        self.state_file = state_file or (Config.BASE_DIR / "simulator_state.json")
+        self.state_file = state_file or Config.SIMULATOR_STATE_FILE
         self._load_sim_state()
+
+        # ===== SAFETY INFRASTRUCTURE INITIALIZATION =====
+        # The live order path must never continue with missing safety controls.
+        # Any construction error is fatal: do not fall back to reduced protection.
+        self.audit_ledger = AuditLedger()
+
+        # Initialize kill switch
+        self.kill_switch = KillSwitch(
+            sentinel_path=Config.KILL_SWITCH_SENTINEL_PATH,
+            audit_ledger=self.audit_ledger,
+        )
+
+        # Initialize paper/live boundary. The local simulator has no broker account to verify.
+        if self.is_simulated:
+            self.paper_live_boundary = None
+            logger.info("Simulator mode: Paper/Live boundary skipped (no broker account to verify)")
+        else:
+            expected_mode = AccountMode.LIVE if Config.ALPACA_LIVE else AccountMode.PAPER
+            self.paper_live_boundary = PaperLiveBoundary(
+                expected_mode=expected_mode,
+                broker_client=self.client,
+                audit_ledger=self.audit_ledger,
+            )
+
+        self.mandate_gate = MandateGate(
+            config=Config,
+            kill_switch=self.kill_switch,
+            audit_ledger=self.audit_ledger,
+        )
+
+        # Advisory checks are observational only. The interface is opt-in; use
+        # configured HTTP providers rather than a mock that would always approve.
+        self.advisory_orchestrator = None
+        if Config.ADVISORY_ENABLED:
+            from safety.http_advisory import HTTPAdvisoryProviderFactory
+            providers = HTTPAdvisoryProviderFactory.create_from_env()
+            if not providers:
+                raise RuntimeError(
+                    "ADVISORY_ENABLED is true but no ADVISORY_n_ENDPOINT is configured"
+                )
+            self.advisory_orchestrator = AdvisoryOrchestrator(
+                providers=providers,
+                timeout_ms=Config.ADVISORY_TIMEOUT_MS,
+            )
+            logger.info("Advisory layer enabled with %d configured provider(s)", len(providers))
+        else:
+            logger.info("Advisory layer disabled")
+
+        self._log_safety_status()
+
+    def _log_safety_status(self):
+        """Log current safety infrastructure status."""
+        mode = "LIVE" if Config.ALPACA_LIVE else ("ALPACA_PAPER" if not self.is_simulated else "LOCAL_SIMULATOR")
+        boundary_mode = self.paper_live_boundary.expected_mode.value if self.paper_live_boundary else "N/A (simulator)"
+        ks_state = self.kill_switch.get_state().value if self.kill_switch else "N/A"
+        mg_active = "active" if self.mandate_gate else "N/A"
+        al_active = "active" if self.audit_ledger else "N/A"
+        ao_enabled = "enabled" if self.advisory_orchestrator else "disabled"
+        logger.info(
+            f"Safety infrastructure initialized: "
+            f"mode={mode}, "
+            f"kill_switch={ks_state}, "
+            f"mandate_gate={mg_active}, "
+            f"audit_ledger={al_active}, "
+            f"paper_live_boundary={boundary_mode}, "
+            f"advisory={ao_enabled}"
+        )
 
     def _load_sim_state(self):
         """Restores the simulator's cash and positions from disk.
@@ -326,6 +417,86 @@ class AlpacaBroker:
             "currency": "USD"
         }
 
+    def get_portfolio_history(self, period: str, timeframe: str) -> Dict[str, Any]:
+        """Return Alpaca account portfolio history without inventing simulator data.
+
+        `period` is a dashboard range. `1Y` maps to Alpaca's `1A`; `All`
+        requests from the account's creation timestamp through the current time.
+        The returned P&L percentage stays as Alpaca's fractional value so the
+        caller can format it consistently for other consumers.
+        """
+        if self.is_simulated or not self.client:
+            return {
+                "available": False,
+                "period": period,
+                "timeframe": timeframe,
+                "base_value": None,
+                "points": [],
+                "error": "Alpaca portfolio history is unavailable for the local simulator.",
+            }
+
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        api_period = "1A" if period == "1Y" else period
+        request_fields: Dict[str, Any] = {"timeframe": timeframe}
+        if period == "All":
+            account = retry_api_call(
+                lambda: self.client.get_account(),
+                max_retries=2,
+                base_delay=1.0,
+                operation_name="get_account_for_portfolio_history",
+            )
+            account_created_at = getattr(account, "created_at", None)
+            if account_created_at is None:
+                return {
+                    "available": False,
+                    "period": period,
+                    "timeframe": timeframe,
+                    "base_value": None,
+                    "points": [],
+                    "error": "Alpaca account creation time is unavailable; cannot request all history.",
+                }
+            request_fields.update({
+                "start": account_created_at,
+                "end": datetime.now(timezone.utc),
+            })
+        else:
+            request_fields["period"] = api_period
+
+        history_filter = GetPortfolioHistoryRequest(**request_fields)
+        history = retry_api_call(
+            lambda: self.client.get_portfolio_history(history_filter),
+            max_retries=2,
+            base_delay=1.0,
+            operation_name="get_portfolio_history",
+        )
+
+        timestamps = list(getattr(history, "timestamp", None) or [])
+        equity = list(getattr(history, "equity", None) or [])
+        profit_loss = list(getattr(history, "profit_loss", None) or [])
+        profit_loss_pct = list(getattr(history, "profit_loss_pct", None) or [])
+
+        def value_at(series: List[Any], index: int) -> Optional[float]:
+            value = series[index] if index < len(series) else None
+            return float(value) if value is not None else None
+
+        points = [
+            {
+                "timestamp": int(timestamp),
+                "equity": value_at(equity, index),
+                "profit_loss": value_at(profit_loss, index),
+                "profit_loss_pct": value_at(profit_loss_pct, index),
+            }
+            for index, timestamp in enumerate(timestamps)
+        ]
+        return {
+            "available": True,
+            "period": period,
+            "timeframe": str(getattr(history, "timeframe", None) or timeframe),
+            "base_value": float(history.base_value) if getattr(history, "base_value", None) is not None else None,
+            "points": points,
+        }
+
     def _get_protective_order_prices(self) -> tuple:
         """Reads the stop and take-profit prices from the open orders.
 
@@ -430,7 +601,142 @@ class AlpacaBroker:
     ) -> OrderResult:
         """
         Submits a Market Buy with server-side Bracket Stop Loss & Take Profit.
+
+        Now includes Vibe-Trading inspired safety checks:
+        1. Paper/Live Boundary verification
+        2. Mandate Gate structural compliance
+        3. Advisory Review (opt-in)
+        4. Audit logging
         """
+        notional_usd = qty * entry_price
+
+        # ===== SAFETY CHECK 1: Paper/Live Boundary =====
+        # Skip in simulator mode (no real broker to verify against)
+        if self.paper_live_boundary is not None:
+            try:
+                self.paper_live_boundary.enforce_mode(
+                    operation=f"place_bracket_buy_order:{symbol}",
+                    context={'symbol': symbol, 'qty': qty, 'notional_usd': notional_usd}
+                )
+            except Exception as e:
+                self.audit_ledger.log_order_rejected(
+                    symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
+                    reason=f"Paper/live boundary violation: {e}",
+                    violations=[{'type': 'mode_mismatch', 'message': str(e)}],
+                    context={'entry_price': entry_price}
+                )
+                return OrderResult(
+                    success=False,
+                    order_id="",
+                    symbol=symbol,
+                    qty=qty,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss_price,
+                    take_profit=take_profit_price,
+                    message=f"Mode boundary violation: {e}"
+                )
+
+        # ===== SAFETY CHECK 2: Mandate Gate =====
+        # Build mandate context from current account state
+        account = self.get_account_summary()
+        open_positions = self.get_open_positions()
+
+        mandate_context = MandateContext(
+            symbol=symbol,
+            side='buy',
+            notional_usd=notional_usd,
+            qty=qty,
+            account_equity=account['equity'],
+            account_cash=account['cash'],
+            account_buying_power=account['buying_power'],
+            account_mode=account['mode'],
+            open_positions=open_positions,
+            open_position_count=len(open_positions),
+            daily_notional_usd=self.mandate_gate._daily_notional_usd if self.mandate_gate else 0.0,
+            daily_order_count=self.mandate_gate._daily_order_count if self.mandate_gate else 0,
+            daily_trade_count=self.mandate_gate._daily_trade_count if self.mandate_gate else 0,
+            kill_switch_active=self.kill_switch.is_active() if self.kill_switch else False,
+        )
+
+        violations = self.mandate_gate.check(mandate_context) if self.mandate_gate else []
+        if violations:
+            # Log mandate violations
+            if self.audit_ledger:
+                self.audit_ledger.log_order_rejected(
+                    symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
+                    reason="Mandate gate violation",
+                    violations=[{'type': v.violation_type.value, 'message': v.message, 'details': v.details} for v in violations],
+                    context={'entry_price': entry_price, 'stop_loss': stop_loss_price, 'take_profit': take_profit_price}
+                )
+            violation_msgs = "; ".join(v.message for v in violations)
+            return OrderResult(
+                success=False,
+                order_id="",
+                symbol=symbol,
+                qty=qty,
+                entry_price=entry_price,
+                stop_loss=stop_loss_price,
+                take_profit=take_profit_price,
+                message=f"Mandate gate blocked: {violation_msgs}"
+            )
+
+        # ===== SAFETY CHECK 3: Advisory Review (opt-in) =====
+        if self.advisory_orchestrator:
+            # Build advisory context
+            # Calculate drawdown
+            drawdown = 0.0
+            if hasattr(self, 'risk_mgr') and self.risk_mgr.start_of_day_equity:
+                drawdown = max(0, (self.risk_mgr.start_of_day_equity - account['equity']) / self.risk_mgr.start_of_day_equity)
+
+            # Calculate total exposure
+            total_exposure = sum(p.get('qty', 0) * p.get('current_price', 0) for p in open_positions.values())
+
+            # Existing position
+            existing_pos = open_positions.get(symbol, {})
+            existing_qty = existing_pos.get('qty', 0)
+            existing_notional = existing_qty * existing_pos.get('current_price', 0)
+
+            advisory_context = AdvisoryContext(
+                symbol=symbol,
+                side='buy',
+                notional_usd=notional_usd,
+                qty=qty,
+                account_equity=account['equity'],
+                account_drawdown=drawdown,
+                open_position_count=len(open_positions),
+                total_exposure_usd=total_exposure,
+                funding_usd=account['buying_power'],
+                existing_position_qty=existing_qty,
+                existing_position_notional=existing_notional,
+                daily_pnl_usd=account['equity'] - account.get('last_equity', account['equity']),
+                daily_pnl_pct=((account['equity'] - account.get('last_equity', account['equity'])) / account.get('last_equity', account['equity']) * 100) if account.get('last_equity') else 0.0,
+            )
+
+            advisory_result = self.advisory_orchestrator.review(advisory_context)
+
+            # Log advisory review
+            self.audit_ledger.log_advisory_review(
+                symbol=symbol,
+                side='buy',
+                notional_usd=notional_usd,
+                verdict=advisory_result.final_verdict.value,
+                concerns=advisory_result.all_concerns,
+                provider_id='orchestrator',
+                context={'advisory_details': advisory_result.to_dict()},
+            )
+
+            # Advisory is fail-open: only log concerns, never block
+            if advisory_result.final_verdict == AdvisoryVerdict.REJECT:
+                logger.warning(
+                    f"ADVISORY REJECT for {symbol}: {advisory_result.all_concerns}. "
+                    f"Proceeding anyway (fail-open)."
+                )
+            elif advisory_result.final_verdict == AdvisoryVerdict.APPROVE_WITH_CONCERNS:
+                logger.info(
+                    f"ADVISORY CONCERNS for {symbol}: {advisory_result.all_concerns}"
+                )
+
+        # ===== EXECUTE ORDER =====
         if not self.is_simulated and self.client:
             try:
                 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
@@ -495,6 +801,16 @@ class AlpacaBroker:
                             ),
                         )
 
+                # Log successful order submission
+                if self.audit_ledger:
+                    self.audit_ledger.log_order_submitted(
+                        symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
+                        price=entry_price, order_id=str(order.id),
+                        context={'stop_loss': stop_loss_price, 'take_profit': take_profit_price}
+                    )
+                if self.mandate_gate:
+                    self.mandate_gate.record_order_submitted(symbol, notional_usd)
+
                 return OrderResult(
                     success=True,
                     order_id=str(order.id),
@@ -546,6 +862,16 @@ class AlpacaBroker:
             entry_time=datetime.now(timezone.utc).isoformat()
         )
         self._save_sim_state()
+
+        # Log simulator order
+        if self.audit_ledger:
+            self.audit_ledger.log_order_submitted(
+                symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
+                price=entry_price, order_id=order_id,
+                context={'stop_loss': stop_loss_price, 'take_profit': take_profit_price, 'simulator': True}
+            )
+        if self.mandate_gate:
+            self.mandate_gate.record_order_submitted(symbol, notional_usd)
 
         return OrderResult(
             success=True,
@@ -601,7 +927,51 @@ class AlpacaBroker:
 
         Used to act on a SELL signal. The bracket orders attached to the
         original entry hold the shares, so they are cancelled first.
+
+        Includes safety checks:
+        - Kill switch allows cancellations (always allowed)
+        - Paper/Live boundary verification
+        - Audit logging
         """
+        # Kill switch allows cancellations even when active
+        if self.kill_switch and not self.kill_switch.allows_cancellations():
+            logger.warning(f"Kill switch blocks cancellations (unexpected)")
+            return OrderResult(
+                success=False,
+                order_id="",
+                symbol=symbol,
+                qty=qty,
+                entry_price=0.0,
+                stop_loss=0.0,
+                take_profit=0.0,
+                message="Kill switch blocks cancellations"
+            )
+
+        # Paper/Live boundary check (skip in simulator mode)
+        if self.paper_live_boundary is not None:
+            try:
+                self.paper_live_boundary.enforce_mode(
+                    operation=f"place_close_position_order:{symbol}",
+                    context={'symbol': symbol, 'qty': qty}
+                )
+            except Exception as e:
+                if self.audit_ledger:
+                    self.audit_ledger.log_system_event(
+                        event_type="mode_enforcement_block",
+                        message=f"Close order blocked by mode mismatch: {e}",
+                        context={'symbol': symbol, 'qty': qty}
+                    )
+                return OrderResult(
+                    success=False,
+                    order_id="",
+                    symbol=symbol,
+                    qty=qty,
+                    entry_price=0.0,
+                    stop_loss=0.0,
+                    take_profit=0.0,
+                    message=f"Mode boundary violation: {e}"
+                )
+
         if not self.is_simulated and self.client:
             try:
                 from alpaca.trading.requests import MarketOrderRequest
@@ -623,6 +993,19 @@ class AlpacaBroker:
                     base_delay=1.0,
                     operation_name=f"close_position({symbol})"
                 )
+
+                # Log close order
+                position = self.get_open_positions().get(symbol, {})
+                entry_price = position.get('entry_price', 0.0)
+                notional_usd = qty * position.get('current_price', entry_price)
+
+                if self.audit_ledger:
+                    self.audit_ledger.log_order_submitted(
+                        symbol=symbol, side='sell', notional_usd=notional_usd, qty=qty,
+                        price=position.get('current_price', 0.0), order_id=str(order.id),
+                        context={'reason': reason, 'close_order': True}
+                    )
+
                 return OrderResult(
                     success=True,
                     order_id=str(order.id),
@@ -671,6 +1054,14 @@ class AlpacaBroker:
 
         order_id = f"SIM-CLOSE-{self.order_counter}"
         self.order_counter += 1
+
+        # Log simulator close
+        if self.audit_ledger:
+            self.audit_ledger.log_order_submitted(
+                symbol=symbol, side='sell', notional_usd=proceeds, qty=close_qty,
+                price=position.current_price, order_id=order_id,
+                context={'reason': reason, 'close_order': True, 'simulator': True}
+            )
 
         return OrderResult(
             success=True,
@@ -965,313 +1356,3 @@ class AlpacaBroker:
 
         self.last_simulated_exit_details = exit_details
         return exits
-# Safety infrastructure imports
-from safety import (
-    MandateGate,
-    MandateContext,
-    KillSwitch,
-    AuditLedger,
-    PaperLiveBoundary,
-    AccountMode,
-    AdvisoryOrchestrator,
-    AdvisoryVerdict,
-)
-
-    Includes Vibe-Trading inspired safety infrastructure:
-    - Mandate Gate: Structural pre-trade compliance
-    - Kill Switch: Emergency halt with filesystem sentinel
-    - Audit Ledger: Hash-chained immutable audit trail
-    - Paper/Live Boundary: Structural mode separation
-    # Class-level defaults so attributes always exist even if __init__ is interrupted
-    paper_live_boundary: Optional[PaperLiveBoundary] = None
-    kill_switch: Optional[KillSwitch] = None
-    mandate_gate: Optional[MandateGate] = None
-    audit_ledger: Optional[AuditLedger] = None
-    advisory_orchestrator: Optional[AdvisoryOrchestrator] = None
-
-        # ===== SAFETY INFRASTRUCTURE INITIALIZATION =====
-        # The live order path must never continue with missing safety controls.
-        # Any construction error is fatal: do not fall back to reduced protection.
-        self.audit_ledger = AuditLedger()
-
-        # Initialize kill switch
-        self.kill_switch = KillSwitch(
-            sentinel_path=Config.KILL_SWITCH_SENTINEL_PATH,
-            audit_ledger=self.audit_ledger,
-        )
-
-        # Initialize paper/live boundary. The local simulator has no broker account to verify.
-        if self.is_simulated:
-            self.paper_live_boundary = None
-            logger.info("Simulator mode: Paper/Live boundary skipped (no broker account to verify)")
-        else:
-            expected_mode = AccountMode.LIVE if Config.ALPACA_LIVE else AccountMode.PAPER
-            self.paper_live_boundary = PaperLiveBoundary(
-                expected_mode=expected_mode,
-                broker_client=self.client,
-                audit_ledger=self.audit_ledger,
-            )
-
-        self.mandate_gate = MandateGate(
-            config=Config,
-            kill_switch=self.kill_switch,
-            audit_ledger=self.audit_ledger,
-        )
-
-        # Advisory checks are observational only. The interface is opt-in; use
-        # configured HTTP providers rather than a mock that would always approve.
-        self.advisory_orchestrator = None
-        if Config.ADVISORY_ENABLED:
-            from safety.http_advisory import HTTPAdvisoryProviderFactory
-            providers = HTTPAdvisoryProviderFactory.create_from_env()
-            if not providers:
-                raise RuntimeError(
-                    "ADVISORY_ENABLED is true but no ADVISORY_n_ENDPOINT is configured"
-                )
-            self.advisory_orchestrator = AdvisoryOrchestrator(
-                providers=providers,
-                timeout_ms=Config.ADVISORY_TIMEOUT_MS,
-            )
-            logger.info("Advisory layer enabled with %d configured provider(s)", len(providers))
-        else:
-            logger.info("Advisory layer disabled")
-
-        self._log_safety_status()
-
-    def _log_safety_status(self):
-        """Log current safety infrastructure status."""
-        mode = "LIVE" if Config.ALPACA_LIVE else ("ALPACA_PAPER" if not self.is_simulated else "LOCAL_SIMULATOR")
-        boundary_mode = self.paper_live_boundary.expected_mode.value if self.paper_live_boundary else "N/A (simulator)"
-        ks_state = self.kill_switch.get_state().value if self.kill_switch else "N/A"
-        mg_active = "active" if self.mandate_gate else "N/A"
-        al_active = "active" if self.audit_ledger else "N/A"
-        ao_enabled = "enabled" if self.advisory_orchestrator else "disabled"
-        logger.info(
-            f"Safety infrastructure initialized: "
-            f"mode={mode}, "
-            f"kill_switch={ks_state}, "
-            f"mandate_gate={mg_active}, "
-            f"audit_ledger={al_active}, "
-            f"paper_live_boundary={boundary_mode}, "
-            f"advisory={ao_enabled}"
-        )
-
-
-        Now includes Vibe-Trading inspired safety checks:
-        1. Paper/Live Boundary verification
-        2. Mandate Gate structural compliance
-        3. Advisory Review (opt-in)
-        4. Audit logging
-        notional_usd = qty * entry_price
-
-        # ===== SAFETY CHECK 1: Paper/Live Boundary =====
-        # Skip in simulator mode (no real broker to verify against)
-        if self.paper_live_boundary is not None:
-            try:
-                self.paper_live_boundary.enforce_mode(
-                    operation=f"place_bracket_buy_order:{symbol}",
-                    context={'symbol': symbol, 'qty': qty, 'notional_usd': notional_usd}
-                )
-            except Exception as e:
-                self.audit_ledger.log_order_rejected(
-                    symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
-                    reason=f"Paper/live boundary violation: {e}",
-                    violations=[{'type': 'mode_mismatch', 'message': str(e)}],
-                    context={'entry_price': entry_price}
-                )
-                return OrderResult(
-                    success=False,
-                    order_id="",
-                    symbol=symbol,
-                    qty=qty,
-                    entry_price=entry_price,
-                    stop_loss=stop_loss_price,
-                    take_profit=take_profit_price,
-                    message=f"Mode boundary violation: {e}"
-                )
-
-        # ===== SAFETY CHECK 2: Mandate Gate =====
-        # Build mandate context from current account state
-        account = self.get_account_summary()
-        open_positions = self.get_open_positions()
-
-        mandate_context = MandateContext(
-            symbol=symbol,
-            side='buy',
-            notional_usd=notional_usd,
-            qty=qty,
-            account_equity=account['equity'],
-            account_cash=account['cash'],
-            account_buying_power=account['buying_power'],
-            account_mode=account['mode'],
-            open_positions=open_positions,
-            open_position_count=len(open_positions),
-            daily_notional_usd=self.mandate_gate._daily_notional_usd if self.mandate_gate else 0.0,
-            daily_order_count=self.mandate_gate._daily_order_count if self.mandate_gate else 0,
-            daily_trade_count=self.mandate_gate._daily_trade_count if self.mandate_gate else 0,
-            kill_switch_active=self.kill_switch.is_active() if self.kill_switch else False,
-        )
-
-        violations = self.mandate_gate.check(mandate_context) if self.mandate_gate else []
-        if violations:
-            # Log mandate violations
-            if self.audit_ledger:
-                self.audit_ledger.log_order_rejected(
-                    symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
-                    reason="Mandate gate violation",
-                    violations=[{'type': v.violation_type.value, 'message': v.message, 'details': v.details} for v in violations],
-                    context={'entry_price': entry_price, 'stop_loss': stop_loss_price, 'take_profit': take_profit_price}
-                )
-            violation_msgs = "; ".join(v.message for v in violations)
-            return OrderResult(
-                success=False,
-                order_id="",
-                symbol=symbol,
-                qty=qty,
-                entry_price=entry_price,
-                stop_loss=stop_loss_price,
-                take_profit=take_profit_price,
-                message=f"Mandate gate blocked: {violation_msgs}"
-            )
-
-        # ===== SAFETY CHECK 3: Advisory Review (opt-in) =====
-        if self.advisory_orchestrator:
-            # Build advisory context
-            # Calculate drawdown
-            drawdown = 0.0
-            if hasattr(self, 'risk_mgr') and self.risk_mgr.start_of_day_equity:
-                drawdown = max(0, (self.risk_mgr.start_of_day_equity - account['equity']) / self.risk_mgr.start_of_day_equity)
-
-            # Calculate total exposure
-            total_exposure = sum(p.get('qty', 0) * p.get('current_price', 0) for p in open_positions.values())
-
-            # Existing position
-            existing_pos = open_positions.get(symbol, {})
-            existing_qty = existing_pos.get('qty', 0)
-            existing_notional = existing_qty * existing_pos.get('current_price', 0)
-
-            advisory_context = AdvisoryContext(
-                symbol=symbol,
-                side='buy',
-                notional_usd=notional_usd,
-                qty=qty,
-                account_equity=account['equity'],
-                account_drawdown=drawdown,
-                open_position_count=len(open_positions),
-                total_exposure_usd=total_exposure,
-                funding_usd=account['buying_power'],
-                existing_position_qty=existing_qty,
-                existing_position_notional=existing_notional,
-                daily_pnl_usd=account['equity'] - account.get('last_equity', account['equity']),
-                daily_pnl_pct=((account['equity'] - account.get('last_equity', account['equity'])) / account.get('last_equity', account['equity']) * 100) if account.get('last_equity') else 0.0,
-            )
-
-            advisory_result = self.advisory_orchestrator.review(advisory_context)
-
-            # Log advisory review
-            self.audit_ledger.log_advisory_review(
-                symbol=symbol,
-                side='buy',
-                notional_usd=notional_usd,
-                verdict=advisory_result.final_verdict.value,
-                concerns=advisory_result.all_concerns,
-                provider_id='orchestrator',
-                context={'advisory_details': advisory_result.to_dict()},
-            )
-
-            # Advisory is fail-open: only log concerns, never block
-            if advisory_result.final_verdict == AdvisoryVerdict.REJECT:
-                logger.warning(
-                    f"ADVISORY REJECT for {symbol}: {advisory_result.all_concerns}. "
-                    f"Proceeding anyway (fail-open)."
-                )
-            elif advisory_result.final_verdict == AdvisoryVerdict.APPROVE_WITH_CONCERNS:
-                logger.info(
-                    f"ADVISORY CONCERNS for {symbol}: {advisory_result.all_concerns}"
-                )
-
-        # ===== EXECUTE ORDER =====
-                # Log successful order submission
-                if self.audit_ledger:
-                    self.audit_ledger.log_order_submitted(
-                        symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
-                        price=entry_price, order_id=str(order.id),
-                        context={'stop_loss': stop_loss_price, 'take_profit': take_profit_price}
-                    )
-                if self.mandate_gate:
-                    self.mandate_gate.record_order_submitted(symbol, notional_usd)
-
-        # Log simulator order
-        if self.audit_ledger:
-            self.audit_ledger.log_order_submitted(
-                symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
-                price=entry_price, order_id=order_id,
-                context={'stop_loss': stop_loss_price, 'take_profit': take_profit_price, 'simulator': True}
-            )
-        if self.mandate_gate:
-            self.mandate_gate.record_order_submitted(symbol, notional_usd)
-
-
-        Includes safety checks:
-        - Kill switch allows cancellations (always allowed)
-        - Paper/Live boundary verification
-        - Audit logging
-        # Kill switch allows cancellations even when active
-        if self.kill_switch and not self.kill_switch.allows_cancellations():
-            logger.warning(f"Kill switch blocks cancellations (unexpected)")
-            return OrderResult(
-                success=False,
-                order_id="",
-                symbol=symbol,
-                qty=qty,
-                entry_price=0.0,
-                stop_loss=0.0,
-                take_profit=0.0,
-                message="Kill switch blocks cancellations"
-            )
-
-        # Paper/Live boundary check (skip in simulator mode)
-        if self.paper_live_boundary is not None:
-            try:
-                self.paper_live_boundary.enforce_mode(
-                    operation=f"place_close_position_order:{symbol}",
-                    context={'symbol': symbol, 'qty': qty}
-                )
-            except Exception as e:
-                if self.audit_ledger:
-                    self.audit_ledger.log_system_event(
-                        event_type="mode_enforcement_block",
-                        message=f"Close order blocked by mode mismatch: {e}",
-                        context={'symbol': symbol, 'qty': qty}
-                    )
-                return OrderResult(
-                    success=False,
-                    order_id="",
-                    symbol=symbol,
-                    qty=qty,
-                    entry_price=0.0,
-                    stop_loss=0.0,
-                    take_profit=0.0,
-                    message=f"Mode boundary violation: {e}"
-                )
-
-
-                # Log close order
-                position = self.get_open_positions().get(symbol, {})
-                entry_price = position.get('entry_price', 0.0)
-                notional_usd = qty * position.get('current_price', entry_price)
-
-                if self.audit_ledger:
-                    self.audit_ledger.log_order_submitted(
-                        symbol=symbol, side='sell', notional_usd=notional_usd, qty=qty,
-                        price=position.get('current_price', 0.0), order_id=str(order.id),
-                        context={'reason': reason, 'close_order': True}
-                    )
-
-        # Log simulator close
-        if self.audit_ledger:
-            self.audit_ledger.log_order_submitted(
-                symbol=symbol, side='sell', notional_usd=proceeds, qty=close_qty,
-                price=position.current_price, order_id=order_id,
-                context={'reason': reason, 'close_order': True, 'simulator': True}
-            )

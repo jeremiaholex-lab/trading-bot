@@ -14,15 +14,15 @@
         "min_volume_ratio": 0.8
       },
       "performance": {
-        "win_rate": 33.33,
-        "profit_factor": 1.13,
-        "sharpe_ratio": 0.27,
+        "win_rate": 27.27,
+        "profit_factor": 0.91,
+        "sharpe_ratio": -0.19,
         "max_drawdown_pct": 2.25,
-        "total_trades": 12,
-        "fitness_score": 1.02
+        "total_trades": 11,
+        "fitness_score": 0.66
       },
       "improved": false,
-      "optimized_at": "2026-10-28T08:07:03.226916+00:00"
+      "optimized_at": "2026-11-02T16:49:20.452466+00:00"
     },
     "QQQ": {
       "params": {
@@ -37,15 +37,15 @@
         "min_volume_ratio": 0.8
       },
       "performance": {
-        "win_rate": 33.33,
-        "profit_factor": 1.31,
-        "sharpe_ratio": 0.54,
+        "win_rate": 27.27,
+        "profit_factor": 1.05,
+        "sharpe_ratio": 0.09,
         "max_drawdown_pct": 3.03,
-        "total_trades": 12,
-        "fitness_score": 1.17
+        "total_trades": 11,
+        "fitness_score": 0.8
       },
       "improved": false,
-      "optimized_at": "2026-10-28T08:07:23.327114+00:00"
+      "optimized_at": "2026-11-02T16:49:50.589002+00:00"
     },
     "AAPL": {
       "params": {
@@ -60,15 +60,15 @@
         "min_volume_ratio": 0.8
       },
       "performance": {
-        "win_rate": 52.94,
-        "profit_factor": 1.97,
-        "sharpe_ratio": 2.32,
+        "win_rate": 50.0,
+        "profit_factor": 1.81,
+        "sharpe_ratio": 1.45,
         "max_drawdown_pct": 4.2,
-        "total_trades": 17,
-        "fitness_score": 2.49
+        "total_trades": 16,
+        "fitness_score": 2.02
       },
-      "improved": true,
-      "optimized_at": "2026-10-28T08:07:45.407310+00:00"
+      "improved": false,
+      "optimized_at": "2026-11-02T16:50:31.588414+00:00"
     },
     "NVDA": {
       "params": {
@@ -88,10 +88,10 @@
         "sharpe_ratio": 1.43,
         "max_drawdown_pct": 4.85,
         "total_trades": 8,
-        "fitness_score": 2.09
+        "fitness_score": 2.1
       },
       "improved": false,
-      "optimized_at": "2026-10-28T08:08:06.219447+00:00"
+      "optimized_at": "2026-11-02T16:50:55.291795+00:00"
     },
     "MSFT": {
       "params": {
@@ -106,15 +106,15 @@
         "min_volume_ratio": 0.8
       },
       "performance": {
-        "win_rate": 46.15,
-        "profit_factor": 1.81,
-        "sharpe_ratio": 1.45,
+        "win_rate": 42.86,
+        "profit_factor": 1.63,
+        "sharpe_ratio": 1.25,
         "max_drawdown_pct": 3.95,
-        "total_trades": 13,
-        "fitness_score": 1.94
+        "total_trades": 14,
+        "fitness_score": 1.75
       },
       "improved": false,
-      "optimized_at": "2026-10-28T08:08:27.639321+00:00"
+      "optimized_at": "2026-11-02T16:51:16.004043+00:00"
     },
     "TSLA": {
       "params": {
@@ -131,13 +131,13 @@
       "performance": {
         "win_rate": 33.33,
         "profit_factor": 1.24,
-        "sharpe_ratio": 0.53,
+        "sharpe_ratio": 0.91,
         "max_drawdown_pct": 9.72,
         "total_trades": 15,
-        "fitness_score": 0.95
+        "fitness_score": 1.13
       },
       "improved": false,
-      "optimized_at": "2026-10-28T08:08:47.669575+00:00"
+      "optimized_at": "2026-11-02T16:51:40.220514+00:00"
     },
     "AMD": {
       "params": {
@@ -152,16 +152,16 @@
         "min_volume_ratio": 0.8
       },
       "performance": {
-        "win_rate": 33.33,
-        "profit_factor": 1.09,
-        "sharpe_ratio": 0.14,
+        "win_rate": 28.57,
+        "profit_factor": 0.85,
+        "sharpe_ratio": -0.1,
         "max_drawdown_pct": 10.95,
-        "total_trades": 6,
-        "fitness_score": 0.7
+        "total_trades": 7,
+        "fitness_score": 0.43
       },
       "improved": false,
-      "optimized_at": "2026-10-28T08:09:07.629486+00:00"
+      "optimized_at": "2026-11-02T16:52:12.408303+00:00"
     }
   },
-  "last_updated": "2026-10-28T08:09:07.629486+00:00"
+  "last_updated": "2026-11-02T16:52:12.408303+00:00"
 }

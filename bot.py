@@ -26,6 +26,9 @@ from execution.alpaca_broker import AlpacaBroker
 from execution.webhook import WebhookNotifier
 from execution.trade_journal import TradeJournal
 
+# Safety infrastructure
+from safety import KillSwitch, AuditLedger, MandateGate
+
 # Configure UTF-8 encoding for Windows console compatibility
 if sys.platform == "win32":
     try:
@@ -68,6 +71,7 @@ class TradingBotOrchestrator:
 
     def __init__(self):
         Config.assert_valid()
+        logger.info("Using account profile %s", Config.BOT_PROFILE)
         self.market_data = MarketDataProvider()
         self.broker = AlpacaBroker()
         self.risk_mgr = RiskManager()
@@ -76,9 +80,20 @@ class TradingBotOrchestrator:
         self.macro_filter = MacroTrendFilter()
         self._scaled_out_positions = set()
 
+        # Expose safety infrastructure from broker for risk manager and other components
+        self.kill_switch = self.broker.kill_switch
+        self.audit_ledger = self.broker.audit_ledger
+        self.mandate_gate = self.broker.mandate_gate
+        self.advisory_orchestrator = self.broker.advisory_orchestrator
+
         # Initialize start of day equity
         acc = self.broker.get_account_summary()
         self.risk_mgr.update_start_of_day_equity(acc['equity'])
+
+        # Pass safety infrastructure to risk manager
+        self.risk_mgr.kill_switch = self.kill_switch
+        self.risk_mgr.audit_ledger = self.audit_ledger
+        self.risk_mgr.mandate_gate = self.mandate_gate
 
         # --- Session reporting state -------------------------------------
         # The operator wants one report per trading session, not one per
@@ -92,10 +107,11 @@ class TradingBotOrchestrator:
         # `bot.py --status-telegram` process reads it so the status
         # message reflects the RUNNING bot rather than a newly spawned
         # one with an empty session.
-        self._heartbeat_path = Config.BASE_DIR / "bot_heartbeat.json"
+        self._heartbeat_path = Config.HEARTBEAT_PATH
         self._cycle_count = 0
         self._market_open = False
         self._started_at = datetime.now(timezone.utc).isoformat()
+        self._next_open = None
 
     def _ensure_session_state(self):
         """Initialises the per-instance session tracking containers.
@@ -262,6 +278,7 @@ class TradingBotOrchestrator:
         """
         try:
             heartbeat = {
+                "profile": Config.BOT_PROFILE,
                 "pid": os.getpid(),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "scans": self._session_scans,
@@ -271,6 +288,7 @@ class TradingBotOrchestrator:
                 "warnings": list(self._session_warnings),
                 "market_state": "OPEN" if self._market_open else "CLOSED",
                 "started_at": self._started_at,
+                "next_open": getattr(self, "_next_open", None),
             }
             tmp = self._heartbeat_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(heartbeat, indent=2), encoding="utf-8")
@@ -920,6 +938,15 @@ class TradingBotOrchestrator:
                         wake_early = max(0, wait_seconds - 120)
                         hours_left = wake_early / 3600
 
+                        # Report liveness even while closed. Without this the
+                        # dashboard sees "NO HEARTBEAT / market UNKNOWN" all
+                        # evening, indistinguishable from a dead bot.
+                        self._next_open = (
+                            next_open.isoformat() if hasattr(next_open, "isoformat")
+                            else (str(next_open) if next_open else None)
+                        )
+                        self._write_heartbeat()
+
                         if hours_left > 0.1:
                             console.print(Panel(
                                 f"[bold yellow]🌙 Market is CLOSED[/bold yellow]\n"
@@ -1045,13 +1072,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        # Expose safety infrastructure from broker for risk manager and other components
-        self.kill_switch = self.broker.kill_switch
-        self.audit_ledger = self.broker.audit_ledger
-        self.mandate_gate = self.broker.mandate_gate
-        self.advisory_orchestrator = self.broker.advisory_orchestrator
-
-        # Pass safety infrastructure to risk manager
-        self.risk_mgr.kill_switch = self.kill_switch
-        self.risk_mgr.audit_ledger = self.audit_ledger
-        self.risk_mgr.mandate_gate = self.mandate_gate

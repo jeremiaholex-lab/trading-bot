@@ -117,6 +117,17 @@ On Windows, `start_bot.bat` does the same thing in one double-click.
 3. Leave `ALPACA_LIVE=False` and let it run a full session on paper.
 4. Only then set `ALPACA_LIVE=True`.
 
+### Two paper accounts
+
+The multi-account launcher keeps each account's credentials, journal, optimizer state, simulator state, heartbeat, and logs separate. It starts a bot worker and read-only dashboard for every configured profile; both profiles are restricted to Alpaca paper mode.
+
+1. Create a separate paper API key pair for the second Alpaca account.
+2. Copy `.env.example` to `.env.secondary` and enter the second account's paper keys locally. Keep `ALPACA_LIVE=False`; `.env.secondary` is ignored by Git.
+3. Stop any bot or dashboard already running from this checkout, then run `python run_accounts.py`.
+4. Open `http://127.0.0.1:8765` and choose **Secondary** from the **Account** selector. The secondary dashboard is on port `8766`.
+
+Switching accounts only changes the dashboard view; it does not start or stop workers. Stop the launcher with Ctrl+C to stop the workers and dashboards it started.
+
 ---
 
 ## Commands
