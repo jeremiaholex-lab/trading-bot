@@ -22,7 +22,7 @@ from strategy.macro_filter import MacroTrendFilter
 from risk.risk_manager import RiskManager
 from optimizer.self_improver import SelfImprover
 from optimizer.backtester import StrategyBacktester
-from execution.alpaca_broker import AlpacaBroker
+from execution.alpaca_broker import AlpacaBroker, OrderResult
 from execution.webhook import WebhookNotifier
 from execution.trade_journal import TradeJournal
 
@@ -79,6 +79,7 @@ class TradingBotOrchestrator:
         self.notifier = WebhookNotifier()
         self.macro_filter = MacroTrendFilter()
         self._scaled_out_positions = set()
+        self.broker.init_algo_manager(self.market_data)
 
         # Expose safety infrastructure from broker for risk manager and other components
         self.kill_switch = self.broker.kill_switch
@@ -456,6 +457,13 @@ class TradingBotOrchestrator:
                 days_back=60
             )
             if not df.empty and len(df) >= 50:
+                if Config.DATA_QUALITY_ENABLED and hasattr(self.market_data, "get_quality_report"):
+                    report = self.market_data.get_quality_report(sym)
+                    if report:
+                        skip, reason = report.should_skip()
+                        if skip:
+                            logger.warning(f"Data quality gate: skipping {sym} ({reason})")
+                            continue
                 frames[sym] = df
 
         # Macro market environment evaluation
@@ -582,13 +590,86 @@ class TradingBotOrchestrator:
                     console.print(
                         f"   🛡️ Stop Loss: ${signal.stop_loss_price:.2f} | 🎯 Take Profit: ${signal.take_profit_price:.2f}"
                     )
-                    order_res = self.broker.place_bracket_buy_order(
-                        symbol=sym,
-                        qty=size_res.shares,
-                        entry_price=signal.entry_price,
-                        stop_loss_price=signal.stop_loss_price,
-                        take_profit_price=signal.take_profit_price
-                    )
+                    order_type = getattr(Config, "DEFAULT_ORDER_TYPE", "market")
+                    if order_type == "limit":
+                        order_res = self.broker.place_limit_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            limit_price=signal.entry_price,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                    elif order_type == "stop_limit":
+                        order_res = self.broker.place_stop_limit_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            stop_price=signal.entry_price,
+                            limit_price=signal.entry_price * 1.002,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                    elif order_type == "twap":
+                        handle = self.broker.place_twap_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            duration_minutes=5.0,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                        order_res = OrderResult(
+                            success=True,
+                            order_id=handle.algo_id,
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            message=f"TWAP algo order initiated: {handle.algo_id[:8]}"
+                        )
+                    elif order_type == "vwap":
+                        handle = self.broker.place_vwap_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            duration_minutes=5.0,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                        order_res = OrderResult(
+                            success=True,
+                            order_id=handle.algo_id,
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            message=f"VWAP algo order initiated: {handle.algo_id[:8]}"
+                        )
+                    elif order_type == "iceberg":
+                        handle = self.broker.place_iceberg_buy(
+                            symbol=sym,
+                            total_qty=size_res.shares,
+                            display_qty=None,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                        order_res = OrderResult(
+                            success=True,
+                            order_id=handle.algo_id,
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            message=f"Iceberg algo order initiated: {handle.algo_id[:8]}"
+                        )
+                    else:
+                        order_res = self.broker.place_bracket_buy_order(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price
+                        )
                     if order_res.success:
                         console.print(f"   ✅ [bold green]{order_res.message}[/bold green]")
                         self._notify_order("BUY", sym, size_res.shares, signal.entry_price, signal.reason)

@@ -205,12 +205,34 @@ class Config:
     # Paper/Live Boundary
     ENABLE_PAPER_LIVE_BOUNDARY: bool = os.getenv("ENABLE_PAPER_LIVE_BOUNDARY", "True").lower() in ("true", "1", "yes")
 
-    # Benchmark used to score ALPHA (excess return) during optimisation.
-    # A self-improver that optimises RAW return mistakes riding a bull market
-    # for edge; scoring excess return over this benchmark keeps the optimizer
-    # tuned for genuine outperformance. Set to a broad market index for the
-    # universe being traded (SPY for US large caps).
-    BENCHMARK_SYMBOL: str = os.getenv("BENCHMARK_SYMBOL", "SPY").strip().upper()
+    # Simulator slippage and latency configuration (paper-trading realism)
+    SIM_SLIPPAGE_ENABLED: bool = os.getenv("SIM_SLIPPAGE_ENABLED", "True").lower() in ("true", "1", "yes")
+    SIM_EXIT_SLIPPAGE: bool = os.getenv("SIM_EXIT_SLIPPAGE", "False").lower() in ("true", "1", "yes")
+    SIM_SLIPPAGE_BPS: float = float(os.getenv("SIM_SLIPPAGE_BPS", "5.0"))
+    SIM_IMPACT_FACTOR: float = float(os.getenv("SIM_IMPACT_FACTOR", "0.1"))
+    SIM_MIN_SLIPPAGE_BPS: float = float(os.getenv("SIM_MIN_SLIPPAGE_BPS", "0.5"))
+    SIM_MAX_SLIPPAGE_BPS: float = float(os.getenv("SIM_MAX_SLIPPAGE_BPS", "150.0"))
+    SIM_LATENCY_ENABLED: bool = os.getenv("SIM_LATENCY_ENABLED", "True").lower() in ("true", "1", "yes")
+    SIM_LATENCY_MEAN_MS: float = float(os.getenv("SIM_LATENCY_MEAN_MS", "50.0"))
+    SIM_LATENCY_SIGMA_MS: float = float(os.getenv("SIM_LATENCY_SIGMA_MS", "20.0"))
+    SIM_LATENCY_FILL_MS: float = float(os.getenv("SIM_LATENCY_FILL_MS", "30.0"))
+
+    # Order Execution Variety
+    DEFAULT_ORDER_TYPE: str = os.getenv("DEFAULT_ORDER_TYPE", "market").strip().lower()
+    TWAP_SLICES: int = int(os.getenv("TWAP_SLICES", "5"))
+    ICEBERG_DISPLAY_PCT: float = float(os.getenv("ICEBERG_DISPLAY_PCT", "0.20"))
+
+    # Data Quality Configuration
+    DATA_QUALITY_ENABLED: bool = os.getenv("DATA_QUALITY_ENABLED", "True").lower() in ("true", "1", "yes")
+    DATA_QUALITY_MAX_GAP_MULTIPLIER: float = float(os.getenv("DATA_QUALITY_MAX_GAP_MULTIPLIER", "3.0"))
+    DATA_QUALITY_OUTLIER_ZSCORE_THRESHOLD: float = float(os.getenv("DATA_QUALITY_OUTLIER_ZSCORE_THRESHOLD", "4.0"))
+    DATA_QUALITY_OUTLIER_LOOKBACK_WINDOW: int = int(os.getenv("DATA_QUALITY_OUTLIER_LOOKBACK_WINDOW", "50"))
+    DATA_QUALITY_MAX_STALE_BARS: int = int(os.getenv("DATA_QUALITY_MAX_STALE_BARS", "3"))
+    DATA_QUALITY_MAX_STALENESS_SECONDS: int = int(os.getenv("DATA_QUALITY_MAX_STALENESS_SECONDS", "3600"))
+    DATA_QUALITY_VOLUME_SPIKE_MULTIPLIER: float = float(os.getenv("DATA_QUALITY_VOLUME_SPIKE_MULTIPLIER", "10.0"))
+    DATA_QUALITY_VOLUME_LOOKBACK: int = int(os.getenv("DATA_QUALITY_VOLUME_LOOKBACK", "20"))
+    DATA_QUALITY_MIN_BARS_FOR_GAP_DETECTION: int = int(os.getenv("DATA_QUALITY_MIN_BARS_FOR_GAP_DETECTION", "50"))
+    DATA_QUALITY_MIN_BARS_FOR_OUTLIER_DETECTION: int = int(os.getenv("DATA_QUALITY_MIN_BARS_FOR_OUTLIER_DETECTION", "50"))
 
     # State Storage
     STRATEGY_STATE_FILE: Path = STATE_DIR / "strategy_state.json"
@@ -311,6 +333,33 @@ class Config:
 
         if cls.OPTIMIZATION_INTERVAL_HOURS < 1:
             errors.append(f"OPTIMIZATION_INTERVAL_HOURS must be >= 1 (got {cls.OPTIMIZATION_INTERVAL_HOURS})")
+
+        # Validate data quality settings
+        if cls.DATA_QUALITY_MAX_GAP_MULTIPLIER < 1:
+            errors.append(f"DATA_QUALITY_MAX_GAP_MULTIPLIER must be >= 1 (got {cls.DATA_QUALITY_MAX_GAP_MULTIPLIER})")
+        if cls.DATA_QUALITY_OUTLIER_ZSCORE_THRESHOLD < 1:
+            errors.append(f"DATA_QUALITY_OUTLIER_ZSCORE_THRESHOLD must be >= 1 (got {cls.DATA_QUALITY_OUTLIER_ZSCORE_THRESHOLD})")
+        if cls.DATA_QUALITY_MAX_STALE_BARS < 1:
+            errors.append(f"DATA_QUALITY_MAX_STALE_BARS must be >= 1 (got {cls.DATA_QUALITY_MAX_STALE_BARS})")
+        if cls.DATA_QUALITY_MAX_STALENESS_SECONDS < 60:
+            errors.append(f"DATA_QUALITY_MAX_STALENESS_SECONDS must be >= 60 (got {cls.DATA_QUALITY_MAX_STALENESS_SECONDS})")
+        if cls.DATA_QUALITY_VOLUME_SPIKE_MULTIPLIER < 1:
+            errors.append(f"DATA_QUALITY_VOLUME_SPIKE_MULTIPLIER must be >= 1 (got {cls.DATA_QUALITY_VOLUME_SPIKE_MULTIPLIER})")
+
+        # Validate order type settings
+        valid_order_types = {"market", "limit", "stop_limit", "twap", "vwap", "iceberg"}
+        if cls.DEFAULT_ORDER_TYPE not in valid_order_types:
+            errors.append(f"DEFAULT_ORDER_TYPE must be one of {sorted(valid_order_types)} (got {cls.DEFAULT_ORDER_TYPE!r})")
+        if cls.TWAP_SLICES < 1:
+            errors.append(f"TWAP_SLICES must be >= 1 (got {cls.TWAP_SLICES})")
+        if not (0.0 < cls.ICEBERG_DISPLAY_PCT <= 1.0):
+            errors.append(f"ICEBERG_DISPLAY_PCT must be between 0.0 and 1.0 (got {cls.ICEBERG_DISPLAY_PCT})")
+
+        # Validate simulator realism settings
+        if cls.SIM_MIN_SLIPPAGE_BPS < 0:
+            errors.append(f"SIM_MIN_SLIPPAGE_BPS must be >= 0 (got {cls.SIM_MIN_SLIPPAGE_BPS})")
+        if cls.SIM_MAX_SLIPPAGE_BPS < cls.SIM_MIN_SLIPPAGE_BPS:
+            errors.append(f"SIM_MAX_SLIPPAGE_BPS must be >= SIM_MIN_SLIPPAGE_BPS (got {cls.SIM_MAX_SLIPPAGE_BPS} < {cls.SIM_MIN_SLIPPAGE_BPS})")
 
         # The optimisation timeframe must be one the data layer can serve.
         if cls.OPTIMIZATION_TIMEFRAME not in cls.VALID_TIMEFRAMES:

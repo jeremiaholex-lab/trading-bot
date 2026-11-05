@@ -1,6 +1,7 @@
 import json
 import time
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -136,6 +137,11 @@ class AlpacaBroker:
         # bot kept its tuned strategy parameters.
         self.state_file = state_file or Config.SIMULATOR_STATE_FILE
         self._load_sim_state()
+
+        # Simulator realism engine (composite slippage & latency)
+        from execution.simulator import FillEngine
+        self.fill_engine = FillEngine.from_config()
+        self.algo_manager = None
 
         # ===== SAFETY INFRASTRUCTURE INITIALIZATION =====
         # The live order path must never continue with missing safety controls.
@@ -849,17 +855,29 @@ class AlpacaBroker:
             )
 
         self.sim_cash -= cost
+
+        # Realistic slippage & latency models for simulator
+        fill_res = self.fill_engine.fill(
+            price=entry_price,
+            qty=qty,
+            side="buy",
+            symbol=symbol,
+        )
+        slippage_entry = round(fill_res.fill_price, 2)
+        slippage_amount = round(slippage_entry - entry_price, 2)
+        slippage_bps = round(fill_res.slippage.total_bps, 2)
+
         order_id = f"SIM-{self.order_counter}"
         self.order_counter += 1
 
         self.sim_positions[symbol] = SimulatedPosition(
             symbol=symbol,
             qty=qty,
-            entry_price=entry_price,
-            current_price=entry_price,
+            entry_price=slippage_entry,
+            current_price=slippage_entry,
             stop_loss=stop_loss_price,
             take_profit=take_profit_price,
-            entry_time=datetime.now(timezone.utc).isoformat()
+            entry_time=datetime.now(timezone.utc).isoformat(),
         )
         self._save_sim_state()
 
@@ -867,8 +885,10 @@ class AlpacaBroker:
         if self.audit_ledger:
             self.audit_ledger.log_order_submitted(
                 symbol=symbol, side='buy', notional_usd=notional_usd, qty=qty,
-                price=entry_price, order_id=order_id,
-                context={'stop_loss': stop_loss_price, 'take_profit': take_profit_price, 'simulator': True}
+                price=slippage_entry, order_id=order_id,
+                context={'stop_loss': stop_loss_price, 'take_profit': take_profit_price, 'simulator': True,
+                         'slippage_bps': slippage_bps, 'slippage_amount': slippage_amount,
+                         'latency_ms': fill_res.total_latency_ms}
             )
         if self.mandate_gate:
             self.mandate_gate.record_order_submitted(symbol, notional_usd)
@@ -878,10 +898,10 @@ class AlpacaBroker:
             order_id=order_id,
             symbol=symbol,
             qty=qty,
-            entry_price=entry_price,
+            entry_price=slippage_entry,
             stop_loss=stop_loss_price,
             take_profit=take_profit_price,
-            message=f"Filled in Local Simulator at ${entry_price:.2f}"
+            message=f"Filled in Local Simulator at ${slippage_entry:.2f} (slippage: ${slippage_amount:.2f})"
         )
 
     def _cancel_symbol_orders(self, symbol: str, order_types: Optional[tuple] = None) -> List[str]:
@@ -1039,9 +1059,28 @@ class AlpacaBroker:
             )
 
         close_qty = min(qty, position.qty) if (qty is not None and qty > 0) else position.qty
-        proceeds = close_qty * position.current_price
+        
+        # Apply realistic exit slippage & latency in simulator
+        if getattr(Config, "SIM_EXIT_SLIPPAGE", False):
+            fill_res = self.fill_engine.fill(
+                price=position.current_price,
+                qty=close_qty,
+                side="sell",
+                symbol=symbol,
+            )
+            fill_exit = round(fill_res.fill_price, 2)
+            exit_bps = fill_res.slippage.total_bps
+            exit_lat = fill_res.total_latency_ms
+        else:
+            if getattr(Config, "SIM_LATENCY_ENABLED", True) and hasattr(self, "fill_engine"):
+                self.fill_engine.latency.simulate()
+            fill_exit = position.current_price
+            exit_bps = 0.0
+            exit_lat = 0.0
+
+        proceeds = close_qty * fill_exit
         self.sim_cash += proceeds
-        pnl = (position.current_price - position.entry_price) * close_qty
+        pnl = (fill_exit - position.entry_price) * close_qty
 
         if close_qty >= position.qty:
             del self.sim_positions[symbol]
@@ -1059,8 +1098,9 @@ class AlpacaBroker:
         if self.audit_ledger:
             self.audit_ledger.log_order_submitted(
                 symbol=symbol, side='sell', notional_usd=proceeds, qty=close_qty,
-                price=position.current_price, order_id=order_id,
-                context={'reason': reason, 'close_order': True, 'simulator': True}
+                price=fill_exit, order_id=order_id,
+                context={'reason': reason, 'close_order': True, 'simulator': True,
+                         'slippage_bps': exit_bps, 'latency_ms': exit_lat}
             )
 
         return OrderResult(
@@ -1071,7 +1111,7 @@ class AlpacaBroker:
             entry_price=position.entry_price,
             stop_loss=0.0,
             take_profit=0.0,
-            message=f"{action_desc} of {symbol} at ${position.current_price:.2f} "
+            message=f"{action_desc} of {symbol} at ${fill_exit:.2f} "
                     f"(P&L: ${pnl:+,.2f}){(' - ' + reason) if reason else ''}"
         )
 
@@ -1356,3 +1396,89 @@ class AlpacaBroker:
 
         self.last_simulated_exit_details = exit_details
         return exits
+
+    # ===== ORDER EXECUTION VARIETY =====
+
+    def place_limit_buy(
+        self,
+        symbol: str,
+        qty: int,
+        limit_price: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+    ) -> OrderResult:
+        """Submits a limit buy order with bracket stop-loss and take-profit."""
+        from execution.order_types import SimpleOrderExecutor
+        executor = SimpleOrderExecutor(self)
+        return executor.place_limit_buy(symbol, qty, limit_price, stop_loss_price, take_profit_price)
+
+    def place_stop_limit_buy(
+        self,
+        symbol: str,
+        qty: int,
+        stop_price: float,
+        limit_price: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+    ) -> OrderResult:
+        """Submits a stop-limit buy order with bracket stop-loss and take-profit."""
+        from execution.order_types import SimpleOrderExecutor
+        executor = SimpleOrderExecutor(self)
+        return executor.place_stop_limit_buy(
+            symbol, qty, stop_price, limit_price, stop_loss_price, take_profit_price
+        )
+
+    def init_algo_manager(self, market_data_provider) -> None:
+        """Initializes the background algorithmic order manager."""
+        from execution.order_types import AlgoOrderManager
+        self.algo_manager = AlgoOrderManager(
+            place_order_fn=lambda sym, qty, p, sl, tp: self.place_bracket_buy_order(sym, qty, p, sl, tp),
+            get_price_fn=lambda sym: market_data_provider.get_latest_price(sym),
+        )
+
+    def place_twap_buy(
+        self,
+        symbol: str,
+        qty: int,
+        duration_minutes: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+        n_slices: Optional[int] = None,
+    ):
+        """Submits a TWAP (Time-Weighted Average Price) algorithmic buy order."""
+        if self.algo_manager is None:
+            raise RuntimeError("Algo manager not initialized; call broker.init_algo_manager(market_data)")
+        return self.algo_manager.place_twap(
+            symbol, qty, duration_minutes, stop_loss_price, take_profit_price, n_slices=n_slices
+        )
+
+    def place_vwap_buy(
+        self,
+        symbol: str,
+        qty: int,
+        duration_minutes: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+        n_slices: Optional[int] = None,
+    ):
+        """Submits a VWAP (Volume-Weighted Average Price) algorithmic buy order."""
+        if self.algo_manager is None:
+            raise RuntimeError("Algo manager not initialized; call broker.init_algo_manager(market_data)")
+        return self.algo_manager.place_vwap(
+            symbol, qty, duration_minutes, stop_loss_price, take_profit_price, n_slices=n_slices
+        )
+
+    def place_iceberg_buy(
+        self,
+        symbol: str,
+        total_qty: int,
+        display_qty: Optional[int],
+        stop_loss_price: float,
+        take_profit_price: float,
+    ):
+        """Submits an Iceberg algorithmic buy order."""
+        if self.algo_manager is None:
+            raise RuntimeError("Algo manager not initialized; call broker.init_algo_manager(market_data)")
+        return self.algo_manager.place_iceberg(
+            symbol, total_qty, display_qty, stop_loss_price, take_profit_price
+        )
