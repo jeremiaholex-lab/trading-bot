@@ -24,6 +24,11 @@ class BacktestResult:
     max_drawdown_pct: float
     sharpe_ratio: float
     fitness_score: float
+    # Return in excess of the benchmark over the same window. A strategy that
+    # merely rides the market has alpha ~ 0; only genuine edge is rewarded.
+    # Defaults to the raw return when no benchmark is supplied (so a direct
+    # backtest without a benchmark behaves exactly as before).
+    alpha_pct: float = 0.0
 
 
 class StrategyBacktester:
@@ -76,8 +81,28 @@ class StrategyBacktester:
         df: pd.DataFrame,
         params: StrategyParameters,
         symbol: str = "TICKER",
-        initial_capital: float = 10000.0
+        initial_capital: float = 10000.0,
+        start_idx: int = 50,
+        end_idx: Optional[int] = None,
+        benchmark_return_pct: Optional[float] = None
     ) -> BacktestResult:
+        """Run the strategy over a window of an indicator-enriched frame.
+
+        Indicators are computed ONCE on the full frame, then the backtest
+        trades only the [start_idx, end_idx) window. This is the point-in-time
+        fix: a walk-forward test slice must be evaluated with indicators that
+        were warmed up on the real history, not recomputed from the slice's
+        own leading bars (which is a different strategy than the live bot
+        runs). Because every indicator here is causal, the values in the
+        train window are unchanged; only the test window gains the correct
+        warm-up.
+
+        `benchmark_return_pct` is the benchmark's percent return over the same
+        window. When given, the fitness score rewards excess return over the
+        benchmark (alpha) rather than raw return -- so the optimizer cannot
+        mistake riding a bull market for edge. When omitted, the raw return is
+        used, keeping direct backtests unchanged.
+        """
         if df.empty or len(df) < 50:
             return BacktestResult(
                 total_trades=0, winning_trades=0, losing_trades=0,
@@ -104,7 +129,9 @@ class StrategyBacktester:
         equity_curve: List[float] = []  # bar-by-bar marked-to-market equity
         curve_index: List[Any] = []     # timestamps aligned with equity_curve
 
-        for i in range(50, len(df_ind)):
+        start = max(50, start_idx)
+        end = end_idx if end_idx is not None else len(df_ind)
+        for i in range(start, end):
             curr = df_ind.iloc[i]
             prev = df_ind.iloc[i-1]
             close = float(curr['Close'])
@@ -206,10 +233,21 @@ class StrategyBacktester:
         # Sharpe ratio from the DAILY equity curve.
         sharpe = StrategyBacktester._annualised_sharpe(equity_curve, pd.Index(curve_index))
 
+        # Alpha (excess return over the benchmark over the same window). A
+        # strategy that only rides the market has alpha ~ 0 and is not edge.
+        # Without a benchmark the raw return is used, so a direct backtest
+        # is unchanged.
+        if benchmark_return_pct is not None:
+            alpha_pct = total_pnl_pct - benchmark_return_pct
+        else:
+            alpha_pct = total_pnl_pct
+
         # Institutional Fitness Score:
-        # Prioritizes Sharpe, Profit Factor, and Win Rate while heavily penalizing Drawdowns
+        # Prioritizes Sharpe, Profit Factor, and Win Rate while heavily penalizing Drawdowns.
+        # The return term is ALPHA, not raw return -- optimising raw return
+        # rewards buying the market in a bull run and calls it skill.
         penalty_dd = max_dd * 3.0
-        fitness = (sharpe * 0.4) + (profit_factor * 0.3) + (win_rate * 2.0) + (total_pnl_pct * 0.5) - penalty_dd
+        fitness = (sharpe * 0.4) + (profit_factor * 0.3) + (win_rate * 2.0) + (alpha_pct * 0.5) - penalty_dd
 
         # A handful of trades is not evidence. Penalise thin samples so the
         # optimizer does not rank a lucky two-trade run above a robust one.
@@ -225,5 +263,6 @@ class StrategyBacktester:
             profit_factor=round(profit_factor, 2),
             max_drawdown_pct=round(max_dd * 100, 2),
             sharpe_ratio=round(float(sharpe), 2),
-            fitness_score=round(float(fitness), 2)
+            fitness_score=round(float(fitness), 2),
+            alpha_pct=round(float(alpha_pct) * 100, 2)
         )

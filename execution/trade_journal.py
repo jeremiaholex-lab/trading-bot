@@ -16,7 +16,7 @@ class TradeJournal:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or (Config.BASE_DIR / "trades.db")
+        self.db_path = db_path or Config.TRADES_DB_PATH
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -291,6 +291,66 @@ class TradeJournal:
             "largest_loss": round(largest_loss, 2),
             "avg_holding_hours": round(avg_holding_hours, 2),
         }
+
+    def sync_broker_filled_orders(self, broker: Any) -> int:
+        """
+        Reconciles and backfills closed or filled trades that executed on the broker
+        while the bot process was offline (e.g. overnight stops or target limits).
+        """
+        synced_count = 0
+        if broker is None:
+            return 0
+
+        try:
+            # Check for simulated broker exit details first
+            sim_exits = getattr(broker, "last_simulated_exit_details", [])
+            for exit_info in sim_exits:
+                sym = exit_info.get("symbol")
+                price = float(exit_info.get("exit_price", 0.0))
+                reason = exit_info.get("reason", "Simulated exit while running/restarting")
+                res = self.record_full_exit(sym, price, reason)
+                if res:
+                    synced_count += 1
+
+            # In Alpaca live/paper mode, inspect filled closed orders
+            client = getattr(broker, "client", None)
+            if client and not getattr(broker, "is_simulated", True):
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums import QueryOrderStatus
+
+                req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=50)
+                closed_orders = client.get_orders(req) or []
+
+                with self._get_connection() as conn:
+                    open_trades = conn.execute(
+                        "SELECT symbol FROM trades WHERE status IN ('OPEN', 'PARTIALLY_CLOSED')"
+                    ).fetchall()
+                    open_symbols = {r["symbol"] for r in open_trades}
+
+                # Find any open positions currently reported by the broker
+                current_positions = broker.get_open_positions()
+
+                for order in closed_orders:
+                    sym = getattr(order, "symbol", "")
+                    side = str(getattr(order, "side", "")).lower()
+                    filled_qty = int(getattr(order, "filled_qty", 0) or 0)
+                    filled_avg_price = float(getattr(order, "filled_avg_price", 0.0) or 0.0)
+
+                    # If an order sold shares of an open symbol that is no longer held, record exit
+                    if sym in open_symbols and "sell" in side and filled_qty > 0 and sym not in current_positions:
+                        self.record_full_exit(
+                            symbol=sym,
+                            exit_price=filled_avg_price,
+                            reason=f"Offline sync: closed by Alpaca filled order {getattr(order, 'id', '')}"
+                        )
+                        open_symbols.discard(sym)
+                        synced_count += 1
+                        logger.info(f"Journal synced offline exit for {sym} at ${filled_avg_price:.2f}")
+
+        except Exception as e:
+            logger.warning(f"Error syncing broker filled orders to trade journal: {e}")
+
+        return synced_count
 
     def get_recent_trades(self, limit: int = 15) -> List[Dict[str, Any]]:
         """Returns the most recent trades for display."""

@@ -19,12 +19,16 @@ from data.market_data import MarketDataProvider
 from strategy.adaptive_strategy import AdaptiveStrategy, TradeSignal
 from strategy.scanner import AssetScanner
 from strategy.macro_filter import MacroTrendFilter
+from strategy.universe_screener import DynamicUniverseScreener
 from risk.risk_manager import RiskManager
 from optimizer.self_improver import SelfImprover
 from optimizer.backtester import StrategyBacktester
-from execution.alpaca_broker import AlpacaBroker
+from execution.alpaca_broker import AlpacaBroker, OrderResult
 from execution.webhook import WebhookNotifier
 from execution.trade_journal import TradeJournal
+
+# Safety infrastructure
+from safety import KillSwitch, AuditLedger, MandateGate
 
 # Configure UTF-8 encoding for Windows console compatibility
 if sys.platform == "win32":
@@ -68,6 +72,7 @@ class TradingBotOrchestrator:
 
     def __init__(self):
         Config.assert_valid()
+        logger.info("Using account profile %s", Config.BOT_PROFILE)
         self.market_data = MarketDataProvider()
         self.broker = AlpacaBroker()
         self.risk_mgr = RiskManager()
@@ -75,10 +80,30 @@ class TradingBotOrchestrator:
         self.notifier = WebhookNotifier()
         self.macro_filter = MacroTrendFilter()
         self._scaled_out_positions = set()
+        self.broker.init_algo_manager(self.market_data)
+
+        # Expose safety infrastructure from broker for risk manager and other components
+        self.kill_switch = self.broker.kill_switch
+        self.audit_ledger = self.broker.audit_ledger
+        self.mandate_gate = self.broker.mandate_gate
+        self.advisory_orchestrator = self.broker.advisory_orchestrator
 
         # Initialize start of day equity
         acc = self.broker.get_account_summary()
         self.risk_mgr.update_start_of_day_equity(acc['equity'])
+
+        # Pass safety infrastructure to risk manager
+        self.risk_mgr.kill_switch = self.kill_switch
+        self.risk_mgr.audit_ledger = self.audit_ledger
+        self.risk_mgr.mandate_gate = self.mandate_gate
+
+        # Offline Trade Journal Sync: reconcile any orders filled while bot was stopped
+        try:
+            synced = self.journal.sync_broker_filled_orders(self.broker)
+            if synced > 0:
+                logger.info(f"Reconciled {synced} trade(s) from broker filled orders into journal.")
+        except Exception as e:
+            logger.warning(f"Could not perform initial trade journal sync: {e}")
 
         # --- Session reporting state -------------------------------------
         # The operator wants one report per trading session, not one per
@@ -92,10 +117,11 @@ class TradingBotOrchestrator:
         # `bot.py --status-telegram` process reads it so the status
         # message reflects the RUNNING bot rather than a newly spawned
         # one with an empty session.
-        self._heartbeat_path = Config.BASE_DIR / "bot_heartbeat.json"
+        self._heartbeat_path = Config.HEARTBEAT_PATH
         self._cycle_count = 0
         self._market_open = False
         self._started_at = datetime.now(timezone.utc).isoformat()
+        self._next_open = None
 
     def _ensure_session_state(self):
         """Initialises the per-instance session tracking containers.
@@ -262,6 +288,7 @@ class TradingBotOrchestrator:
         """
         try:
             heartbeat = {
+                "profile": Config.BOT_PROFILE,
                 "pid": os.getpid(),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "scans": self._session_scans,
@@ -271,6 +298,8 @@ class TradingBotOrchestrator:
                 "warnings": list(self._session_warnings),
                 "market_state": "OPEN" if self._market_open else "CLOSED",
                 "started_at": self._started_at,
+                "next_open": getattr(self, "_next_open", None),
+                "positions_reconciliation": self.broker.positions_reconciliation(),
             }
             tmp = self._heartbeat_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(heartbeat, indent=2), encoding="utf-8")
@@ -303,6 +332,15 @@ class TradingBotOrchestrator:
             equity = float(acc.get("equity", 0.0))
             last_equity = float(acc.get("last_equity", 0.0) or 0.0)
             positions = list(self.broker.get_open_positions().values())
+
+            # Whether the position view above is trustworthy. During a broker
+            # outage get_open_positions() degrades to an empty dict, so we
+            # surface the outage here rather than silently showing "flat".
+            reconciliation = {"ok": True, "error": None, "source": "unknown"}
+            try:
+                reconciliation = self.broker.positions_reconciliation()
+            except Exception:
+                pass
 
             daily_pnl = equity - last_equity if last_equity else 0.0
             daily_pnl_pct = (daily_pnl / last_equity * 100.0) if last_equity else 0.0
@@ -348,6 +386,7 @@ class TradingBotOrchestrator:
                 "last_scan_at": last_scan,
                 "warnings": warnings,
                 "heartbeat": heartbeat,
+                "positions_reconciliation": reconciliation,
             }
         except Exception as e:
             logger.warning(f"Could not build bot status: {e}")
@@ -438,6 +477,13 @@ class TradingBotOrchestrator:
                 days_back=60
             )
             if not df.empty and len(df) >= 50:
+                if Config.DATA_QUALITY_ENABLED and hasattr(self.market_data, "get_quality_report"):
+                    report = self.market_data.get_quality_report(sym)
+                    if report:
+                        skip, reason = report.should_skip()
+                        if skip:
+                            logger.warning(f"Data quality gate: skipping {sym} ({reason})")
+                            continue
                 frames[sym] = df
 
         # Macro market environment evaluation
@@ -448,10 +494,24 @@ class TradingBotOrchestrator:
                 if macro_state.get("is_bearish"):
                     b_str = ", ".join(macro_state.get("bearish_benchmarks", []))
                     console.print(f"[bold yellow]⚠️ Macro Market Alert: Benchmarks ({b_str}) in Daily TRENDING_BEAR. Longs gated by relative strength.[/bold yellow]")
+                # Market Breadth check across universe frames
+                if frames and hasattr(self.macro_filter, "breadth_filter"):
+                    breadth_res = self.macro_filter.breadth_filter.compute_market_breadth(frames)
+                    macro_state["breadth"] = breadth_res
+                    if not breadth_res.get("healthy_breadth"):
+                        console.print(f"[bold yellow]⚠️ Macro Market Alert: {breadth_res.get('reason')}[/bold yellow]")
             except Exception as e:
                 logger.warning(f"Macro market evaluation error: {e}")
 
-        # Rank by conviction; the highest-scoring symbols are considered first.
+        # Congressional STOCK Act disclosure watch (advisory, off by default).
+        # Logs fresh congressional trades in watchlist tickers; never blocks.
+        if getattr(Config, "ENABLE_CONGRESS_WATCH", False):
+            try:
+                self.risk_mgr.log_congress_advisories(universe)
+            except Exception as e:
+                logger.warning(f"Congress advisory check failed: {e}")
+
+        # Rank by conviction and dynamic in-play alpha; the highest-scoring symbols are considered first.
         conviction_order = list(universe)
         conviction_scores = {}
         if frames:
@@ -459,10 +519,33 @@ class TradingBotOrchestrator:
                 ranked = AssetScanner(universe).scan_and_rank(frames)
                 ranked_symbols = [r["symbol"] for r in ranked]
                 conviction_scores = {r["symbol"]: r["score"] for r in ranked}
-                conviction_order = (
-                    [s for s in ranked_symbols if s in universe]
-                    + [s for s in universe if s not in ranked_symbols]
-                )
+
+                # Optional dynamic in-play screener integration: prioritizes high-RVOL, expanding volatility assets at top of scan
+                if getattr(Config, "ENABLE_DYNAMIC_UNIVERSE_SCREENER", True):
+                    screener = DynamicUniverseScreener(
+                        min_rvol=getattr(Config, "SCREENER_MIN_RVOL", 1.1),
+                        min_atr_pct=getattr(Config, "SCREENER_MIN_ATR_PCT", 0.012),
+                    )
+                    screened_in_play = screener.screen_candidates(frames)
+                    if screened_in_play:
+                        in_play_syms = [s["symbol"] for s in screened_in_play]
+                        console.print(f"[bold green]🎯 In-Play Alpha Universe: {', '.join(in_play_syms)}[/bold green]")
+                        # Elevate in-play candidates to the front of candidate evaluation order
+                        conviction_order = (
+                            [s for s in in_play_syms if s in universe]
+                            + [s for s in ranked_symbols if s in universe and s not in in_play_syms]
+                            + [s for s in universe if s not in ranked_symbols and s not in in_play_syms]
+                        )
+                    else:
+                        conviction_order = (
+                            [s for s in ranked_symbols if s in universe]
+                            + [s for s in universe if s not in ranked_symbols]
+                        )
+                else:
+                    conviction_order = (
+                        [s for s in ranked_symbols if s in universe]
+                        + [s for s in universe if s not in ranked_symbols]
+                    )
             except Exception as e:
                 logger.warning(f"Conviction ranking failed, falling back to watchlist order: {e}")
 
@@ -529,6 +612,14 @@ class TradingBotOrchestrator:
                     except Exception as e:
                         logger.warning(f"Macro check failed for {sym}: {e}")
 
+                # Fetch quote for real-time bid-ask spread validation
+                bid_q, ask_q = 0.0, 0.0
+                if hasattr(self.broker, "get_latest_quote"):
+                    try:
+                        bid_q, ask_q = self.broker.get_latest_quote(sym)
+                    except Exception:
+                        bid_q, ask_q = 0.0, 0.0
+
                 try:
                     size_res = self.risk_mgr.calculate_position_size(
                         signal=signal,
@@ -536,7 +627,10 @@ class TradingBotOrchestrator:
                         cash_available=acc['cash'],
                         current_open_positions_count=len(open_pos),
                         already_holding_symbol=sym in open_pos,
-                        open_positions=open_pos
+                        open_positions=open_pos,
+                        price_history_map=frames,
+                        bid_price=bid_q,
+                        ask_price=ask_q
                     )
                 except TypeError:
                     size_res = self.risk_mgr.calculate_position_size(
@@ -556,13 +650,86 @@ class TradingBotOrchestrator:
                     console.print(
                         f"   🛡️ Stop Loss: ${signal.stop_loss_price:.2f} | 🎯 Take Profit: ${signal.take_profit_price:.2f}"
                     )
-                    order_res = self.broker.place_bracket_buy_order(
-                        symbol=sym,
-                        qty=size_res.shares,
-                        entry_price=signal.entry_price,
-                        stop_loss_price=signal.stop_loss_price,
-                        take_profit_price=signal.take_profit_price
-                    )
+                    order_type = getattr(Config, "DEFAULT_ORDER_TYPE", "market")
+                    if order_type == "limit":
+                        order_res = self.broker.place_limit_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            limit_price=signal.entry_price,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                    elif order_type == "stop_limit":
+                        order_res = self.broker.place_stop_limit_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            stop_price=signal.entry_price,
+                            limit_price=signal.entry_price * 1.002,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                    elif order_type == "twap":
+                        handle = self.broker.place_twap_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            duration_minutes=5.0,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                        order_res = OrderResult(
+                            success=True,
+                            order_id=handle.algo_id,
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            message=f"TWAP algo order initiated: {handle.algo_id[:8]}"
+                        )
+                    elif order_type == "vwap":
+                        handle = self.broker.place_vwap_buy(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            duration_minutes=5.0,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                        order_res = OrderResult(
+                            success=True,
+                            order_id=handle.algo_id,
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            message=f"VWAP algo order initiated: {handle.algo_id[:8]}"
+                        )
+                    elif order_type == "iceberg":
+                        handle = self.broker.place_iceberg_buy(
+                            symbol=sym,
+                            total_qty=size_res.shares,
+                            display_qty=None,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price,
+                        )
+                        order_res = OrderResult(
+                            success=True,
+                            order_id=handle.algo_id,
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss_price,
+                            take_profit=signal.take_profit_price,
+                            message=f"Iceberg algo order initiated: {handle.algo_id[:8]}"
+                        )
+                    else:
+                        order_res = self.broker.place_bracket_buy_order(
+                            symbol=sym,
+                            qty=size_res.shares,
+                            entry_price=signal.entry_price,
+                            stop_loss_price=signal.stop_loss_price,
+                            take_profit_price=signal.take_profit_price
+                        )
                     if order_res.success:
                         console.print(f"   ✅ [bold green]{order_res.message}[/bold green]")
                         self._notify_order("BUY", sym, size_res.shares, signal.entry_price, signal.reason)
@@ -758,6 +925,9 @@ class TradingBotOrchestrator:
         opt_table.add_column("Fitness Score", justify="right")
         opt_table.add_column("Tuned Parameters", style="dim")
 
+        # Benchmark for alpha scoring. Fetched once for the whole run.
+        benchmark_df = SelfImprover.fetch_benchmark(self.market_data)
+
         for sym in symbols:
             df = self.market_data.get_historical_bars(
                 sym,
@@ -768,7 +938,7 @@ class TradingBotOrchestrator:
                 opt_table.add_row(sym, "[yellow]Skipped[/yellow]", "-", "-", "-", "-", "No data")
                 continue
 
-            res = self.self_improver.optimize_symbol(sym, df)
+            res = self.self_improver.optimize_symbol(sym, df, benchmark_df=benchmark_df)
             if res.get("status") == "skipped":
                 opt_table.add_row(sym, "[yellow]Skipped[/yellow]", "-", "-", "-", "-", res.get("reason"))
                 continue
@@ -811,7 +981,14 @@ class TradingBotOrchestrator:
             return
 
         params = self.self_improver.get_symbol_params(symbol)
-        res = StrategyBacktester.run_backtest(df, params, symbol=symbol)
+        benchmark_df = SelfImprover.fetch_benchmark(self.market_data)
+        # The backtest trades from bar 50 (indicator warm-up) to the last bar.
+        benchmark_return_pct = SelfImprover._benchmark_return_pct(
+            benchmark_df, df.index[50], df.index[-1]
+        )
+        res = StrategyBacktester.run_backtest(
+            df, params, symbol=symbol, benchmark_return_pct=benchmark_return_pct
+        )
 
         bt_table = Table(title=f"📈 Quantitative Performance Report: {symbol}")
         bt_table.add_column("Metric", style="bold")
@@ -823,6 +1000,7 @@ class TradingBotOrchestrator:
         bt_table.add_row("Win Rate", f"{res.win_rate:.1f}%")
         bt_table.add_row("Profit Factor", f"{res.profit_factor:.2f}")
         bt_table.add_row("Total Return", f"{res.total_pnl_pct:+.2f}%")
+        bt_table.add_row("Alpha vs Benchmark", f"{res.alpha_pct:+.2f}%")
         bt_table.add_row("Max Drawdown", f"{res.max_drawdown_pct:.2f}%")
         bt_table.add_row("Annualized Sharpe Ratio", f"{res.sharpe_ratio:.2f}")
         bt_table.add_row("Overall Fitness Score", f"{res.fitness_score:.2f}")
@@ -900,6 +1078,15 @@ class TradingBotOrchestrator:
                         # Cap the sleep display and wake up 2 minutes early for pre-market calibration
                         wake_early = max(0, wait_seconds - 120)
                         hours_left = wake_early / 3600
+
+                        # Report liveness even while closed. Without this the
+                        # dashboard sees "NO HEARTBEAT / market UNKNOWN" all
+                        # evening, indistinguishable from a dead bot.
+                        self._next_open = (
+                            next_open.isoformat() if hasattr(next_open, "isoformat")
+                            else (str(next_open) if next_open else None)
+                        )
+                        self._write_heartbeat()
 
                         if hours_left > 0.1:
                             console.print(Panel(
@@ -991,6 +1178,63 @@ class TradingBotOrchestrator:
             self.print_dashboard_status()
 
 
+def _print_paper_forward_summary(summary: dict) -> None:
+    """Human-readable output for the paper-forward validation command."""
+    if not summary:
+        return
+    print(f"Paper-forward snapshots: {summary.get('snapshots', 0)}")
+    print(f"Observed weeks: {summary.get('observed_weeks', 0.0)}")
+    result = summary.get("result")
+    if result is not None:
+        print(
+            f"Strategy return: {result.strategy_return_pct:.2f}%  "
+            f"Baseline: {result.baseline_return_pct:.2f}%  "
+            f"Alpha: {result.alpha_pct:.2f}%"
+        )
+        print(
+            f"Strategy Sharpe: {result.strategy_sharpe:.2f}  "
+            f"Baseline Sharpe: {result.baseline_sharpe:.2f}"
+        )
+        print(f"Strategy max drawdown: {result.strategy_max_drawdown_pct:.2f}%")
+        print(f"Beats baseline (risk-adjusted): {result.beats_baseline}")
+    print(f"Stop status: {summary.get('status', 'unknown')}")
+    for reason in summary.get("reasons", []):
+        print(f"  - {reason}")
+
+
+def _default_journal_path() -> str:
+    # The journal is the owner's validation data, not code -- persist it under
+    # validation/ (gitignored) so a run survives restarts.
+    return os.path.join(os.path.dirname(__file__), "validation", "paper_forward_journal.json")
+
+
+def _run_paper_forward_record(bot: "TradingBotOrchestrator", args) -> None:
+    from validation.runbook_cli import record_paper_forward_snapshot
+    journal_path = args.journal_path or _default_journal_path()
+    try:
+        summary = record_paper_forward_snapshot(
+            bot.broker,
+            baseline_symbol=args.baseline_symbol,
+            baseline_price=args.baseline_price,
+            journal_path=journal_path,
+        )
+    except Exception as e:
+        print(f"Paper-forward record failed: {e}")
+        return
+    _print_paper_forward_summary(summary)
+
+
+def _run_paper_forward_evaluate(args) -> None:
+    from validation.runbook_cli import evaluate_run
+    journal_path = args.journal_path or _default_journal_path()
+    try:
+        summary = evaluate_run(journal_path=journal_path)
+    except Exception as e:
+        print(f"Paper-forward evaluate failed: {e}")
+        return
+    _print_paper_forward_summary(summary)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Automated AI Trading Bot with Self-Improvement")
     parser.add_argument("--scan", action="store_true", help="Perform a single market scan only")
@@ -1003,11 +1247,25 @@ def main():
     parser.add_argument("--report", action="store_true", help="Send the session report to Telegram/Discord now and exit")
     parser.add_argument("--run", action="store_true", help="Start autonomous trading (market-hours aware)")
     parser.add_argument("--interval", type=int, default=60, help="Scan interval in seconds (default: 60)")
+    parser.add_argument("--paper-forward", action="store_true",
+                        help="Record a daily snapshot for the prospective paper-forward validation run")
+    parser.add_argument("--paper-forward-evaluate", action="store_true",
+                        help="Evaluate the paper-forward stop criteria against the existing journal")
+    parser.add_argument("--baseline-symbol", type=str, default="SPY",
+                        help="Baseline symbol to beat (default: SPY)")
+    parser.add_argument("--baseline-price", type=float, default=None,
+                        help="Current baseline price (overrides the data fetch; useful offline)")
+    parser.add_argument("--journal-path", type=str, default=None,
+                        help="Path to the paper-forward journal (default: validation/paper_forward_journal.json)")
 
     args = parser.parse_args()
     bot = TradingBotOrchestrator()
 
-    if args.optimize:
+    if args.paper_forward:
+        _run_paper_forward_record(bot, args)
+    elif args.paper_forward_evaluate:
+        _run_paper_forward_evaluate(args)
+    elif args.optimize:
         bot.run_self_improvement_cycle(target_symbol=args.symbol)
     elif args.backtest:
         bot.run_backtest_symbol(args.backtest.upper())

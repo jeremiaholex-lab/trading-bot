@@ -40,6 +40,11 @@ simulator_state.tmp
 strategy_state_backup_*.json
 strategy_state.json.pre_fix_backup
 
+# Profile-specific account credentials and runtime state
+.env.secondary
+runtime/secondary/
+.run_accounts.lock
+
 # Liveness heartbeat written by the live loop. Runtime state, not source.
 bot_heartbeat.json
 bot_heartbeat.tmp
@@ -48,3 +53,9 @@ bot_heartbeat.tmp
 trades.db
 *.db
 *.sqlite
+
+# Paper-forward validation journal (owner runtime data, not code)
+validation/paper_forward_journal.json
+# Runtime state: audit ledger + kill switch (never commit)
+audit_ledger/
+kill_switch_state.json

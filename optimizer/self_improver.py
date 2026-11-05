@@ -68,7 +68,52 @@ class SelfImprover:
                 return StrategyParameters.from_dict(saved)
         return StrategyParameters()
 
-    def optimize_symbol(self, symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
+    @staticmethod
+    def fetch_benchmark(market_data_provider) -> pd.DataFrame:
+        """Fetches the benchmark's bars over the optimisation window.
+
+        Returns an empty frame when unavailable; the optimiser then degrades
+        to raw-return scoring for that run and logs it (never silently).
+        """
+        try:
+            df = market_data_provider.get_historical_bars(
+                Config.BENCHMARK_SYMBOL,
+                timeframe=Config.OPTIMIZATION_TIMEFRAME,
+                days_back=Config.OPTIMIZATION_LOOKBACK_DAYS
+            )
+            if df.empty:
+                logger.warning(
+                    f"Benchmark {Config.BENCHMARK_SYMBOL} has no data; "
+                    f"optimiser will score raw return for this run."
+                )
+            return df
+        except Exception as e:
+            logger.warning(f"Could not fetch benchmark {Config.BENCHMARK_SYMBOL}: {e}")
+            return pd.DataFrame()
+
+    @staticmethod
+    def _benchmark_return_pct(benchmark_df: Optional[pd.DataFrame], start_ts, end_ts) -> Optional[float]:
+        """Benchmark return as a FRACTION over [start_ts, end_ts].
+
+        Returns None when the benchmark is unavailable, so the backtester
+        falls back to raw return for that window.
+        """
+        if benchmark_df is None or benchmark_df.empty:
+            return None
+        try:
+            window = benchmark_df.loc[start_ts:end_ts]
+            if len(window) < 2:
+                return None
+            first = float(window["Close"].iloc[0])
+            last = float(window["Close"].iloc[-1])
+            if first <= 0:
+                return None
+            return (last - first) / first
+        except Exception as e:
+            logger.warning(f"Benchmark return unavailable for window {start_ts}..{end_ts}: {e}")
+            return None
+
+    def optimize_symbol(self, symbol: str, df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
         Runs walk-forward optimization on the given symbol DataFrame.
         Splits data into 70% In-Sample (Train) and 30% Out-Of-Sample (Test).
@@ -77,6 +122,15 @@ class SelfImprover:
         the training phase. Selecting candidates by their held-out score
         would turn the test set into a second training set and make every
         reported metric optimistic.
+
+        Point-in-time integrity: indicators are computed on the FULL frame and
+        the walk-forward windows are evaluated on that same frame, so the test
+        slice is warmed up on the real history (not its own leading bars).
+        This makes the backtest match what the live bot actually trades.
+
+        Alpha scoring: when `benchmark_df` is given, each window's fitness
+        rewards excess return over the benchmark, so the optimizer cannot
+        mistake riding a bull market for edge. Without it, raw return is used.
         """
         if df.empty or len(df) < 80:
             logger.warning(f"Not enough data to optimize {symbol} (rows: {len(df)})")
@@ -84,12 +138,22 @@ class SelfImprover:
 
         # Walk-forward split
         split_idx = int(len(df) * 0.70)
-        df_train = df.iloc[:split_idx]
-        df_test = df.iloc[split_idx:]
 
-        # Current baseline
+        # Benchmark returns over the train and test windows (as fractions).
+        benchmark_train_pct = self._benchmark_return_pct(
+            benchmark_df, df.index[max(50, 0)], df.index[split_idx - 1]
+        )
+        benchmark_test_pct = self._benchmark_return_pct(
+            benchmark_df, df.index[split_idx], df.index[-1]
+        )
+
+        # Current baseline. Evaluated on the held-out window of the FULL frame,
+        # so its indicators are warmed up on the real history.
         current_params = self.get_symbol_params(symbol)
-        baseline_res = StrategyBacktester.run_backtest(df_test, current_params, symbol=symbol)
+        baseline_res = StrategyBacktester.run_backtest(
+            df, current_params, symbol=symbol,
+            start_idx=split_idx, benchmark_return_pct=benchmark_test_pct
+        )
 
         logger.info(
             f"Optimizing {symbol}... Baseline Out-Of-Sample Win Rate: {baseline_res.win_rate}%, "
@@ -122,7 +186,10 @@ class SelfImprover:
             param_dict = dict(zip(keys, combo))
             candidate = StrategyParameters.from_dict({**current_params.to_dict(), **param_dict})
 
-            in_sample_res = StrategyBacktester.run_backtest(df_train, candidate, symbol=symbol)
+            in_sample_res = StrategyBacktester.run_backtest(
+                df, candidate, symbol=symbol,
+                start_idx=0, end_idx=split_idx, benchmark_return_pct=benchmark_train_pct
+            )
             if in_sample_res.fitness_score <= 0 or in_sample_res.total_trades < 2:
                 continue
 
@@ -141,8 +208,11 @@ class SelfImprover:
         else:
             # --- VALIDATION PHASE --------------------------------------
             # The held-out slice is scored exactly once, on the training
-            # winner. This is the only time df_test is consulted.
-            out_of_sample_res = StrategyBacktester.run_backtest(df_test, best_train_params, symbol=symbol)
+            # winner. This is the only time the test window is consulted.
+            out_of_sample_res = StrategyBacktester.run_backtest(
+                df, best_train_params, symbol=symbol,
+                start_idx=split_idx, benchmark_return_pct=benchmark_test_pct
+            )
             best_params = best_train_params
 
         # --- ADOPTION GATES ---------------------------------------------
@@ -211,6 +281,7 @@ class SelfImprover:
     def run_full_watchlist_optimization(self, market_data_provider) -> Dict[str, Any]:
         """Iterates over all watchlist tickers and optimizes each one."""
         results = {}
+        benchmark_df = self.fetch_benchmark(market_data_provider)
         for sym in Config.WATCHLIST:
             df = market_data_provider.get_historical_bars(
                 sym,
@@ -218,7 +289,7 @@ class SelfImprover:
                 days_back=Config.OPTIMIZATION_LOOKBACK_DAYS
             )
             if not df.empty:
-                res = self.optimize_symbol(sym, df)
+                res = self.optimize_symbol(sym, df, benchmark_df=benchmark_df)
                 results[sym] = res
             else:
                 logger.warning(f"Could not load data for {sym} during optimization.")

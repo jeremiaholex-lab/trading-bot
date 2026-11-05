@@ -8,3 +8,4 @@ rich>=13.0.0
 fastapi>=0.110.0
 uvicorn>=0.28.0
 pytest>=7.0.0
+defusedxml>=0.7.1

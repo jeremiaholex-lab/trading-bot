@@ -4,6 +4,14 @@ from typing import Optional, Dict, Tuple, Any, List
 from config import Config
 from strategy.adaptive_strategy import TradeSignal
 from .earnings_filter import EarningsFilter
+from .news_filter import NewsFilter
+from .congress_filter import CongressFilter
+from .correlation_manager import PortfolioCorrelationManager
+from .macro_calendar_filter import MacroCalendarFilter
+from .spread_filter import BidAskSpreadFilter
+
+# Safety infrastructure
+from safety import KillSwitch, AuditLedger, MandateGate
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +32,51 @@ class RiskManager:
     4. Binary event & earnings blackout guards
     5. Daily drawdown circuit breaker
     6. Trailing stops and profit protection
+
+    Now integrates with Vibe-Trading inspired safety infrastructure:
+    - Kill Switch: Emergency halt
+    - Audit Ledger: Immutable audit trail
+    - Mandate Gate: Structural compliance (delegates to broker's mandate gate)
     """
 
-    def __init__(self, earnings_filter: Optional[EarningsFilter] = None):
+    def __init__(
+        self,
+        earnings_filter: Optional[EarningsFilter] = None,
+        news_filter: Optional[NewsFilter] = None,
+        congress_filter: Optional[CongressFilter] = None,
+        kill_switch: Optional[KillSwitch] = None,
+        audit_ledger: Optional[AuditLedger] = None,
+        mandate_gate: Optional[MandateGate] = None,
+        correlation_manager: Optional[PortfolioCorrelationManager] = None,
+        macro_calendar_filter: Optional[MacroCalendarFilter] = None,
+        spread_filter: Optional[BidAskSpreadFilter] = None
+    ):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
         self.daily_drawdown_limit = Config.DAILY_DRAWDOWN_LIMIT
         self.start_of_day_equity: Optional[float] = None
         self.circuit_breaker_tripped: bool = False
         self.earnings_filter = earnings_filter or EarningsFilter()
+        self.news_filter = news_filter or NewsFilter(
+            sec_user_agent=getattr(Config, "SEC_USER_AGENT", "")
+        )
+        self.congress_filter = congress_filter or CongressFilter()
+
+        # Safety infrastructure references (set by orchestrator)
+        self.kill_switch = kill_switch
+        self.audit_ledger = audit_ledger
+        self.mandate_gate = mandate_gate
+
+        self.macro_calendar_filter = macro_calendar_filter or MacroCalendarFilter(
+            blackout_minutes_before=getattr(Config, "MACRO_BLACKOUT_MINUTES_BEFORE", 30),
+            blackout_minutes_after=getattr(Config, "MACRO_BLACKOUT_MINUTES_AFTER", 30)
+        )
+        self.correlation_manager = correlation_manager or PortfolioCorrelationManager(
+            max_allowed_correlation=getattr(Config, "MAX_PORTFOLIO_CORRELATION", 0.75)
+        )
+        self.spread_filter = spread_filter or BidAskSpreadFilter(
+            max_spread_pct=getattr(Config, "MAX_SPREAD_PCT", 0.0015)
+        )
 
     def update_start_of_day_equity(self, current_equity: float):
         """Initializes or resets the benchmark equity for the trading day."""
@@ -69,6 +113,9 @@ class RiskManager:
         current_open_positions_count: int,
         already_holding_symbol: bool,
         open_positions: Optional[Dict[str, Any]] = None,
+        price_history_map: Optional[Dict[str, Any]] = None,
+        bid_price: float = 0.0,
+        ask_price: float = 0.0,
     ) -> PositionSizeResult:
         """
         Calculates exact number of shares to buy using strict volatility risk sizing
@@ -78,8 +125,32 @@ class RiskManager:
             Risk Per Share = Entry Price - Stop Loss Price
             Target Shares = Max Risk $ / Risk Per Share
         """
+        # 0. Kill Switch check - absolute override
+        if self.kill_switch and self.kill_switch.is_active():
+            if self.audit_ledger:
+                self.audit_ledger.log_risk_event(
+                    event_type="kill_switch_block",
+                    message=f"Order blocked by active kill switch: {signal.symbol}",
+                    symbol=signal.symbol,
+                    context={'side': 'buy', 'signal_confidence': signal.confidence},
+                )
+            return PositionSizeResult(
+                allowed=False,
+                shares=0,
+                cost=0.0,
+                risk_amount=0.0,
+                rejection_reason="Kill switch active - all new entries blocked."
+            )
+
         # 1. Circuit breaker check
         if self.check_circuit_breaker(portfolio_equity):
+            if self.audit_ledger:
+                self.audit_ledger.log_risk_event(
+                    event_type="circuit_breaker_block",
+                    message=f"Order blocked by circuit breaker: {signal.symbol}",
+                    symbol=signal.symbol,
+                    context={'drawdown_pct': (self.start_of_day_equity - portfolio_equity) / self.start_of_day_equity * 100},
+                )
             return PositionSizeResult(
                 allowed=False,
                 shares=0,
@@ -129,18 +200,113 @@ class RiskManager:
                         )
                     )
 
+        # 4b. Dynamic Portfolio Correlation Cap
+        if open_positions and price_history_map and self.correlation_manager:
+            cand_series = price_history_map.get(signal.symbol)
+            if cand_series is not None and hasattr(cand_series, "columns"):
+                close_col = next((c for c in cand_series.columns if str(c).lower() == "close"), None)
+                if close_col:
+                    cand_series = cand_series[close_col]
+            if cand_series is not None:
+                existing_series = {}
+                for open_sym in open_positions:
+                    p_series = price_history_map.get(open_sym)
+                    if p_series is not None:
+                        if hasattr(p_series, "columns"):
+                            c_col = next((c for c in p_series.columns if str(c).lower() == "close"), None)
+                            if c_col:
+                                p_series = p_series[c_col]
+                        existing_series[open_sym] = p_series
+
+                corr_ok, corr_reason = self.correlation_manager.validate_candidate_correlation(
+                    signal.symbol, cand_series, existing_series
+                )
+                if not corr_ok:
+                    return PositionSizeResult(
+                        allowed=False,
+                        shares=0,
+                        cost=0.0,
+                        risk_amount=0.0,
+                        rejection_reason=corr_reason
+                    )
+
         # 5. Binary Event & Earnings Blackout Guard
         if Config.ENABLE_EARNINGS_FILTER and self.earnings_filter:
             in_blackout, earnings_reason = self.earnings_filter.is_in_blackout(
                 signal.symbol, blackout_days=Config.EARNINGS_BLACKOUT_DAYS
             )
             if in_blackout:
+                if self.audit_ledger:
+                    self.audit_ledger.log_risk_event(
+                        event_type="earnings_blackout_block",
+                        message=f"Order blocked by earnings blackout: {signal.symbol}",
+                        symbol=signal.symbol,
+                        context={'reason': earnings_reason},
+                    )
                 return PositionSizeResult(
                     allowed=False,
                     shares=0,
                     cost=0.0,
                     risk_amount=0.0,
                     rejection_reason=f"Earnings Blackout: {earnings_reason}."
+                )
+
+        # 5b. Breaking-News / Event-Risk Guard
+        # Blocks entries on material event risk (important SEC 8-K filings,
+        # risk-keyword headlines) within the lookback window. A fetch failure
+        # never blocks: the filter logs and allows, so an outage cannot halt
+        # trading on a false positive.
+        if Config.ENABLE_NEWS_FILTER and self.news_filter:
+            news_blocked, news_reason = self.news_filter.is_blocked(
+                signal.symbol,
+                hours=Config.NEWS_BLACKOUT_HOURS,
+                important_only=Config.NEWS_IMPORTANT_ONLY,
+            )
+            if news_blocked:
+                logger.warning(
+                    "News gate blocked %s: %s", signal.symbol, news_reason
+                )
+                if self.audit_ledger:
+                    self.audit_ledger.log_risk_event(
+                        event_type="news_gate_block",
+                        message=f"Order blocked by news gate: {signal.symbol}",
+                        symbol=signal.symbol,
+                        context={'reason': news_reason},
+                    )
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"News Risk: {news_reason}."
+                )
+
+        # 4c. Real-Time Bid-Ask Spread Gate
+        if self.spread_filter and bid_price > 0 and ask_price > 0:
+            spread_ok, spread_reason = self.spread_filter.validate_spread(
+                symbol=signal.symbol,
+                bid_price=bid_price,
+                ask_price=ask_price
+            )
+            if not spread_ok:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Spread Gate: {spread_reason}"
+                )
+
+        # 5b. Macroeconomic Calendar Gate (FOMC / CPI / NFP)
+        if getattr(Config, "ENABLE_MACRO_CALENDAR_FILTER", True) and self.macro_calendar_filter:
+            in_macro_blackout, macro_reason = self.macro_calendar_filter.is_in_macro_blackout()
+            if in_macro_blackout:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Macro Calendar Gate: {macro_reason}."
                 )
 
         # 6. Minimum confidence filter
@@ -204,6 +370,21 @@ class RiskManager:
 
         actual_risk_dollars = target_shares * risk_per_share
 
+        # Log successful risk check
+        if self.audit_ledger:
+            self.audit_ledger.log_risk_event(
+                event_type="position_size_calculated",
+                message=f"Position size calculated for {signal.symbol}: {target_shares} shares",
+                symbol=signal.symbol,
+                context={
+                    'target_shares': target_shares,
+                    'total_cost': total_cost,
+                    'risk_amount': actual_risk_dollars,
+                    'entry_price': entry,
+                    'stop_loss': stop_loss,
+                },
+            )
+
         return PositionSizeResult(
             allowed=True,
             shares=target_shares,
@@ -242,3 +423,29 @@ class RiskManager:
         new_stop = max(new_stop, current_stop)
 
         return round(new_stop, 2)
+
+    def log_congress_advisories(self, symbols: Optional[List[str]] = None):
+        """Logs fresh congressional STOCK Act disclosures touching the watchlist.
+
+        Advisory only (an alpha signal, never a block) and off by default.
+        Fails soft: a congressional-data outage is logged and ignored.
+        """
+        if not getattr(Config, "ENABLE_CONGRESS_WATCH", False):
+            return
+        if not symbols:
+            symbols = Config.WATCHLIST
+        try:
+            matches = self.congress_filter.recent_trades(
+                symbols,
+                since_days=getattr(Config, "CONGRESS_SINCE_DAYS", 45),
+            )
+        except Exception as exc:
+            logger.warning("Congress watch failed (%s); skipping", exc)
+            return
+        for m in matches:
+            logger.info(
+                "Congress disclosure: %s (%s) traded %s on %s — doc %s %s",
+                m.get("member", "?"), m.get("district", "?"),
+                ", ".join(m.get("matched_tickers", m.get("tickers", []))),
+                m.get("filed", "?"), m.get("doc_id", "?"), m.get("url", ""),
+            )
