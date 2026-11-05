@@ -113,6 +113,13 @@ class AlpacaBroker:
         self.client = None
         self.is_simulated = True
 
+        # Reconciliation health: whether the last position fetch actually
+        # succeeded. A broker outage makes get_open_positions() degrade to an
+        # empty dict, which is otherwise indistinguishable from a flat account.
+        # These let callers surface an outage instead of silently reading "flat".
+        self._positions_fetch_ok = True
+        self._last_positions_error: Optional[str] = None
+
         if force_simulator:
             logger.info("Forced into Local Paper Simulator mode (force_simulator=True).")
         elif Config.has_alpaca_credentials():
@@ -575,12 +582,21 @@ class AlpacaBroker:
                         "stop_loss": stops.get(p.symbol, 0.0),
                         "take_profit": limits.get(p.symbol, 0.0),
                     }
+                # The position view is trustworthy: it reflects the broker.
+                self._positions_fetch_ok = True
+                self._last_positions_error = None
                 return result
             except Exception as e:
+                # Degrade to an empty view BUT remember the fetch failed, so a
+                # caller can distinguish "no positions" from "broker unreachable".
+                self._positions_fetch_ok = False
+                self._last_positions_error = str(e)
                 logger.error(f"Error fetching Alpaca positions: {e}")
                 return {}
 
-        # Local simulation positions
+        # Local simulation positions -- always trustworthy (no broker round-trip).
+        self._positions_fetch_ok = True
+        self._last_positions_error = None
         res = {}
         for sym, p in self.sim_positions.items():
             pl = (p.current_price - p.entry_price) * p.qty
@@ -596,6 +612,23 @@ class AlpacaBroker:
                 "unrealized_plpc": round(plpc, 2)
             }
         return res
+
+    def positions_reconciliation(self) -> Dict[str, Any]:
+        """Whether the bot's position view is reconciled with the broker.
+
+        During a broker outage get_open_positions() degrades to an empty dict,
+        so "no positions" is ambiguous. This reports whether the last fetch
+        actually succeeded, letting callers (status, heartbeat, dashboard) show
+        an outage instead of silently reading the account as flat.
+
+        Returns:
+            {"ok": bool, "error": Optional[str], "source": "live"|"simulator"}
+        """
+        return {
+            "ok": self._positions_fetch_ok,
+            "error": self._last_positions_error,
+            "source": "live" if not self.is_simulated else "simulator",
+        }
 
     def place_bracket_buy_order(
         self,

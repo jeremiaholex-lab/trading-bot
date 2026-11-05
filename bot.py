@@ -290,6 +290,7 @@ class TradingBotOrchestrator:
                 "market_state": "OPEN" if self._market_open else "CLOSED",
                 "started_at": self._started_at,
                 "next_open": getattr(self, "_next_open", None),
+                "positions_reconciliation": self.broker.positions_reconciliation(),
             }
             tmp = self._heartbeat_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(heartbeat, indent=2), encoding="utf-8")
@@ -322,6 +323,15 @@ class TradingBotOrchestrator:
             equity = float(acc.get("equity", 0.0))
             last_equity = float(acc.get("last_equity", 0.0) or 0.0)
             positions = list(self.broker.get_open_positions().values())
+
+            # Whether the position view above is trustworthy. During a broker
+            # outage get_open_positions() degrades to an empty dict, so we
+            # surface the outage here rather than silently showing "flat".
+            reconciliation = {"ok": True, "error": None, "source": "unknown"}
+            try:
+                reconciliation = self.broker.positions_reconciliation()
+            except Exception:
+                pass
 
             daily_pnl = equity - last_equity if last_equity else 0.0
             daily_pnl_pct = (daily_pnl / last_equity * 100.0) if last_equity else 0.0
@@ -367,6 +377,7 @@ class TradingBotOrchestrator:
                 "last_scan_at": last_scan,
                 "warnings": warnings,
                 "heartbeat": heartbeat,
+                "positions_reconciliation": reconciliation,
             }
         except Exception as e:
             logger.warning(f"Could not build bot status: {e}")
@@ -1118,6 +1129,63 @@ class TradingBotOrchestrator:
             self.print_dashboard_status()
 
 
+def _print_paper_forward_summary(summary: dict) -> None:
+    """Human-readable output for the paper-forward validation command."""
+    if not summary:
+        return
+    print(f"Paper-forward snapshots: {summary.get('snapshots', 0)}")
+    print(f"Observed weeks: {summary.get('observed_weeks', 0.0)}")
+    result = summary.get("result")
+    if result is not None:
+        print(
+            f"Strategy return: {result.strategy_return_pct:.2f}%  "
+            f"Baseline: {result.baseline_return_pct:.2f}%  "
+            f"Alpha: {result.alpha_pct:.2f}%"
+        )
+        print(
+            f"Strategy Sharpe: {result.strategy_sharpe:.2f}  "
+            f"Baseline Sharpe: {result.baseline_sharpe:.2f}"
+        )
+        print(f"Strategy max drawdown: {result.strategy_max_drawdown_pct:.2f}%")
+        print(f"Beats baseline (risk-adjusted): {result.beats_baseline}")
+    print(f"Stop status: {summary.get('status', 'unknown')}")
+    for reason in summary.get("reasons", []):
+        print(f"  - {reason}")
+
+
+def _default_journal_path() -> str:
+    # The journal is the owner's validation data, not code -- persist it under
+    # validation/ (gitignored) so a run survives restarts.
+    return os.path.join(os.path.dirname(__file__), "validation", "paper_forward_journal.json")
+
+
+def _run_paper_forward_record(bot: "TradingBotOrchestrator", args) -> None:
+    from validation.runbook_cli import record_paper_forward_snapshot
+    journal_path = args.journal_path or _default_journal_path()
+    try:
+        summary = record_paper_forward_snapshot(
+            bot.broker,
+            baseline_symbol=args.baseline_symbol,
+            baseline_price=args.baseline_price,
+            journal_path=journal_path,
+        )
+    except Exception as e:
+        print(f"Paper-forward record failed: {e}")
+        return
+    _print_paper_forward_summary(summary)
+
+
+def _run_paper_forward_evaluate(args) -> None:
+    from validation.runbook_cli import evaluate_run
+    journal_path = args.journal_path or _default_journal_path()
+    try:
+        summary = evaluate_run(journal_path=journal_path)
+    except Exception as e:
+        print(f"Paper-forward evaluate failed: {e}")
+        return
+    _print_paper_forward_summary(summary)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Automated AI Trading Bot with Self-Improvement")
     parser.add_argument("--scan", action="store_true", help="Perform a single market scan only")
@@ -1130,11 +1198,25 @@ def main():
     parser.add_argument("--report", action="store_true", help="Send the session report to Telegram/Discord now and exit")
     parser.add_argument("--run", action="store_true", help="Start autonomous trading (market-hours aware)")
     parser.add_argument("--interval", type=int, default=60, help="Scan interval in seconds (default: 60)")
+    parser.add_argument("--paper-forward", action="store_true",
+                        help="Record a daily snapshot for the prospective paper-forward validation run")
+    parser.add_argument("--paper-forward-evaluate", action="store_true",
+                        help="Evaluate the paper-forward stop criteria against the existing journal")
+    parser.add_argument("--baseline-symbol", type=str, default="SPY",
+                        help="Baseline symbol to beat (default: SPY)")
+    parser.add_argument("--baseline-price", type=float, default=None,
+                        help="Current baseline price (overrides the data fetch; useful offline)")
+    parser.add_argument("--journal-path", type=str, default=None,
+                        help="Path to the paper-forward journal (default: validation/paper_forward_journal.json)")
 
     args = parser.parse_args()
     bot = TradingBotOrchestrator()
 
-    if args.optimize:
+    if args.paper_forward:
+        _run_paper_forward_record(bot, args)
+    elif args.paper_forward_evaluate:
+        _run_paper_forward_evaluate(args)
+    elif args.optimize:
         bot.run_self_improvement_cycle(target_symbol=args.symbol)
     elif args.backtest:
         bot.run_backtest_symbol(args.backtest.upper())

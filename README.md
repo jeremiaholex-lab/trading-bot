@@ -189,6 +189,11 @@ Everything lives in `.env` (copy from `.env.example`). `config.py` validates it 
 | `TELEGRAM_CHAT_ID` | – | Chat that receives them |
 | `DISCORD_WEBHOOK_URL` | – | Discord webhook for notifications |
 | `ENABLE_SESSION_REPORT` | `True` | Send the end-of-session report |
+| `SIM_SLIPPAGE_ENABLED` | `True` | Apply slippage/latency in the paper simulator |
+| `SIM_SLIPPAGE_BPS` | `5.0` | Base slippage in basis points |
+| `SIM_MIN_SLIPPAGE_BPS` | `0.5` | Floor — no fill is better than mid |
+| `SIM_MAX_SLIPPAGE_BPS` | `150.0` | Cap — prevents unrealistic fills |
+| `SIM_EXIT_SLIPPAGE` | `False` | Apply the model to exits as well as entries |
 
 ---
 
@@ -225,6 +230,9 @@ trading-bot/
 ├── optimizer/
 │   ├── backtester.py         # Sharpe, profit factor, drawdown, fitness
 │   └── self_improver.py      # Walk-forward optimiser and adoption gates
+├── validation/
+│   ├── personal_validation.py # Owner's capital/risk/time/baseline inputs
+│   └── paper_forward.py      # Prospective paper-vs-baseline comparison
 ├── execution/
 │   ├── alpaca_broker.py      # Alpaca client + local paper simulator
 │   ├── trade_journal.py      # Trade journal (SQLite)
@@ -249,9 +257,20 @@ The suite is hermetic: no network, no orders. That is enforced, not assumed — 
 
 ---
 
+## Personal validation (founder board conditions)
+
+A founder board review (`founder/board.md`) voted **FUND IF** — continue only as a bounded personal-use validation project — and set conditions that must be met before any live consideration. Two are now implemented:
+
+- `validation/personal_validation.py` holds the owner's stated capital, drawdown tolerance, time budget, named baseline, and stop criteria (conditions 1–2). It **fails closed**: an incomplete set refuses to run rather than guessing the owner's risk tolerance.
+- `validation/paper_forward.py` compares a prospective paper-forward equity curve against a named baseline on risk-adjusted return (Sharpe) after costs, and evaluates the personal stop criteria (condition 3). Its Sharpe reuses the backtester's method, so the validation and the walk-forward results mean the same thing.
+
+The paper simulator already models slippage, fill latency, and partial scale-outs; borrow costs are not modeled (see Notes). Live trading remains off until the predeclared evidence threshold is met and the owner explicitly accepts the downside.
+
+---
+
 ## Notes and limitations
 
 - **Sharpe is computed from the daily equity curve**, resampled to daily closes and clipped to ±5, not from trade returns. Short windows produce unstable trade-level Sharpe.
-- **The paper simulator is a learning tool, not a backtest.** It models orders and positions; it does not model slippage, partial fills, or borrow costs. Treat its numbers as directional.
+- **The paper simulator is a learning tool, not a backtest.** It models orders, positions, slippage (spread cost, market impact, volatility widening), and fill latency, and tracks partial scale-outs; it does not model borrow costs. Treat its numbers as directional.
 - **The calibration study covers seven liquid symbols over roughly two years.** The gates are calibrated for that regime and would need re-running before being trusted on a different universe or timeframe.
 - **`strategy_state.json` is tracked in git** because it is the bot's learned memory. Runtime output files that embed your account number are ignored and guarded by a test.
