@@ -5,6 +5,8 @@ from config import Config
 from strategy.adaptive_strategy import TradeSignal
 from .earnings_filter import EarningsFilter
 from .correlation_manager import PortfolioCorrelationManager
+from .macro_calendar_filter import MacroCalendarFilter
+from .spread_filter import BidAskSpreadFilter
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,9 @@ class RiskManager:
     def __init__(
         self,
         earnings_filter: Optional[EarningsFilter] = None,
-        correlation_manager: Optional[PortfolioCorrelationManager] = None
+        correlation_manager: Optional[PortfolioCorrelationManager] = None,
+        macro_calendar_filter: Optional[MacroCalendarFilter] = None,
+        spread_filter: Optional[BidAskSpreadFilter] = None
     ):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
@@ -38,8 +42,15 @@ class RiskManager:
         self.start_of_day_equity: Optional[float] = None
         self.circuit_breaker_tripped: bool = False
         self.earnings_filter = earnings_filter or EarningsFilter()
+        self.macro_calendar_filter = macro_calendar_filter or MacroCalendarFilter(
+            blackout_minutes_before=getattr(Config, "MACRO_BLACKOUT_MINUTES_BEFORE", 30),
+            blackout_minutes_after=getattr(Config, "MACRO_BLACKOUT_MINUTES_AFTER", 30)
+        )
         self.correlation_manager = correlation_manager or PortfolioCorrelationManager(
             max_allowed_correlation=getattr(Config, "MAX_PORTFOLIO_CORRELATION", 0.75)
+        )
+        self.spread_filter = spread_filter or BidAskSpreadFilter(
+            max_spread_pct=getattr(Config, "MAX_SPREAD_PCT", 0.0015)
         )
 
     def update_start_of_day_equity(self, current_equity: float):
@@ -78,6 +89,8 @@ class RiskManager:
         already_holding_symbol: bool,
         open_positions: Optional[Dict[str, Any]] = None,
         price_history_map: Optional[Dict[str, Any]] = None,
+        bid_price: float = 0.0,
+        ask_price: float = 0.0,
     ) -> PositionSizeResult:
         """
         Calculates exact number of shares to buy using strict volatility risk sizing
@@ -180,6 +193,34 @@ class RiskManager:
                     cost=0.0,
                     risk_amount=0.0,
                     rejection_reason=f"Earnings Blackout: {earnings_reason}."
+                )
+
+        # 4c. Real-Time Bid-Ask Spread Gate
+        if self.spread_filter and bid_price > 0 and ask_price > 0:
+            spread_ok, spread_reason = self.spread_filter.validate_spread(
+                symbol=signal.symbol,
+                bid_price=bid_price,
+                ask_price=ask_price
+            )
+            if not spread_ok:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Spread Gate: {spread_reason}"
+                )
+
+        # 5b. Macroeconomic Calendar Gate (FOMC / CPI / NFP)
+        if getattr(Config, "ENABLE_MACRO_CALENDAR_FILTER", True) and self.macro_calendar_filter:
+            in_macro_blackout, macro_reason = self.macro_calendar_filter.is_in_macro_blackout()
+            if in_macro_blackout:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Macro Calendar Gate: {macro_reason}."
                 )
 
         # 6. Minimum confidence filter

@@ -81,6 +81,14 @@ class TradingBotOrchestrator:
         acc = self.broker.get_account_summary()
         self.risk_mgr.update_start_of_day_equity(acc['equity'])
 
+        # Offline Trade Journal Sync: reconcile any orders filled while bot was stopped
+        try:
+            synced = self.journal.sync_broker_filled_orders(self.broker)
+            if synced > 0:
+                logger.info(f"Reconciled {synced} trade(s) from broker filled orders into journal.")
+        except Exception as e:
+            logger.warning(f"Could not perform initial trade journal sync: {e}")
+
         # --- Session reporting state -------------------------------------
         # The operator wants one report per trading session, not one per
         # scan. These track what happened during the current session so the
@@ -559,6 +567,14 @@ class TradingBotOrchestrator:
                     except Exception as e:
                         logger.warning(f"Macro check failed for {sym}: {e}")
 
+                # Fetch quote for real-time bid-ask spread validation
+                bid_q, ask_q = 0.0, 0.0
+                if hasattr(self.broker, "get_latest_quote"):
+                    try:
+                        bid_q, ask_q = self.broker.get_latest_quote(sym)
+                    except Exception:
+                        bid_q, ask_q = 0.0, 0.0
+
                 try:
                     size_res = self.risk_mgr.calculate_position_size(
                         signal=signal,
@@ -567,7 +583,9 @@ class TradingBotOrchestrator:
                         current_open_positions_count=len(open_pos),
                         already_holding_symbol=sym in open_pos,
                         open_positions=open_pos,
-                        price_history_map=frames
+                        price_history_map=frames,
+                        bid_price=bid_q,
+                        ask_price=ask_q
                     )
                 except TypeError:
                     size_res = self.risk_mgr.calculate_position_size(

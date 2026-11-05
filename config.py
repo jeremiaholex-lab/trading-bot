@@ -79,9 +79,13 @@ class Config:
     INVERSE_ETF_MAP: dict = {"SPY": "SH", "QQQ": "PSQ"}
     INVERSE_ETFS: list = ["SH", "PSQ"]
 
-    # Event Risk & Earnings Blackout
+    # Event Risk & Earnings / Macro Blackout
     ENABLE_EARNINGS_FILTER: bool = os.getenv("ENABLE_EARNINGS_FILTER", "True").lower() in ("true", "1", "yes")
     EARNINGS_BLACKOUT_DAYS: int = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
+    ENABLE_MACRO_CALENDAR_FILTER: bool = os.getenv("ENABLE_MACRO_CALENDAR_FILTER", "True").lower() in ("true", "1", "yes")
+    MACRO_BLACKOUT_MINUTES_BEFORE: int = int(os.getenv("MACRO_BLACKOUT_MINUTES_BEFORE", "30"))
+    MACRO_BLACKOUT_MINUTES_AFTER: int = int(os.getenv("MACRO_BLACKOUT_MINUTES_AFTER", "30"))
+    MAX_SPREAD_PCT: float = float(os.getenv("MAX_SPREAD_PCT", "0.0015")) # 0.15% max relative spread
 
     # Macro Market Trend Confluence Filter
     ENABLE_MACRO_TREND_FILTER: bool = os.getenv("ENABLE_MACRO_TREND_FILTER", "True").lower() in ("true", "1", "yes")
