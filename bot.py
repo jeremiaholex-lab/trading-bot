@@ -19,6 +19,7 @@ from data.market_data import MarketDataProvider
 from strategy.adaptive_strategy import AdaptiveStrategy, TradeSignal
 from strategy.scanner import AssetScanner
 from strategy.macro_filter import MacroTrendFilter
+from strategy.universe_screener import DynamicUniverseScreener
 from risk.risk_manager import RiskManager
 from optimizer.self_improver import SelfImprover
 from optimizer.backtester import StrategyBacktester
@@ -448,10 +449,16 @@ class TradingBotOrchestrator:
                 if macro_state.get("is_bearish"):
                     b_str = ", ".join(macro_state.get("bearish_benchmarks", []))
                     console.print(f"[bold yellow]⚠️ Macro Market Alert: Benchmarks ({b_str}) in Daily TRENDING_BEAR. Longs gated by relative strength.[/bold yellow]")
+                # Market Breadth check across universe frames
+                if frames and hasattr(self.macro_filter, "breadth_filter"):
+                    breadth_res = self.macro_filter.breadth_filter.compute_market_breadth(frames)
+                    macro_state["breadth"] = breadth_res
+                    if not breadth_res.get("healthy_breadth"):
+                        console.print(f"[bold yellow]⚠️ Macro Market Alert: {breadth_res.get('reason')}[/bold yellow]")
             except Exception as e:
                 logger.warning(f"Macro market evaluation error: {e}")
 
-        # Rank by conviction; the highest-scoring symbols are considered first.
+        # Rank by conviction and dynamic in-play alpha; the highest-scoring symbols are considered first.
         conviction_order = list(universe)
         conviction_scores = {}
         if frames:
@@ -459,10 +466,33 @@ class TradingBotOrchestrator:
                 ranked = AssetScanner(universe).scan_and_rank(frames)
                 ranked_symbols = [r["symbol"] for r in ranked]
                 conviction_scores = {r["symbol"]: r["score"] for r in ranked}
-                conviction_order = (
-                    [s for s in ranked_symbols if s in universe]
-                    + [s for s in universe if s not in ranked_symbols]
-                )
+
+                # Optional dynamic in-play screener integration: prioritizes high-RVOL, expanding volatility assets at top of scan
+                if getattr(Config, "ENABLE_DYNAMIC_UNIVERSE_SCREENER", True):
+                    screener = DynamicUniverseScreener(
+                        min_rvol=getattr(Config, "SCREENER_MIN_RVOL", 1.1),
+                        min_atr_pct=getattr(Config, "SCREENER_MIN_ATR_PCT", 0.012),
+                    )
+                    screened_in_play = screener.screen_candidates(frames)
+                    if screened_in_play:
+                        in_play_syms = [s["symbol"] for s in screened_in_play]
+                        console.print(f"[bold green]🎯 In-Play Alpha Universe: {', '.join(in_play_syms)}[/bold green]")
+                        # Elevate in-play candidates to the front of candidate evaluation order
+                        conviction_order = (
+                            [s for s in in_play_syms if s in universe]
+                            + [s for s in ranked_symbols if s in universe and s not in in_play_syms]
+                            + [s for s in universe if s not in ranked_symbols and s not in in_play_syms]
+                        )
+                    else:
+                        conviction_order = (
+                            [s for s in ranked_symbols if s in universe]
+                            + [s for s in universe if s not in ranked_symbols]
+                        )
+                else:
+                    conviction_order = (
+                        [s for s in ranked_symbols if s in universe]
+                        + [s for s in universe if s not in ranked_symbols]
+                    )
             except Exception as e:
                 logger.warning(f"Conviction ranking failed, falling back to watchlist order: {e}")
 
@@ -536,7 +566,8 @@ class TradingBotOrchestrator:
                         cash_available=acc['cash'],
                         current_open_positions_count=len(open_pos),
                         already_holding_symbol=sym in open_pos,
-                        open_positions=open_pos
+                        open_positions=open_pos,
+                        price_history_map=frames
                     )
                 except TypeError:
                     size_res = self.risk_mgr.calculate_position_size(

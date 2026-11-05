@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 from config import Config
 from indicators.technicals import TechnicalIndicators
+from .breadth_filter import MarketBreadthFilter
 
 logger = logging.getLogger(__name__)
 
@@ -12,8 +13,13 @@ class MacroTrendFilter:
     to protect against dead-cat bounce traps during broader market corrections.
     """
 
-    def __init__(self, benchmark_symbols: Optional[List[str]] = None):
+    def __init__(
+        self,
+        benchmark_symbols: Optional[List[str]] = None,
+        breadth_filter: Optional[MarketBreadthFilter] = None
+    ):
         self.benchmark_symbols = benchmark_symbols or Config.MACRO_BENCHMARK_SYMBOLS
+        self.breadth_filter = breadth_filter or MarketBreadthFilter()
         self._cached_macro_state: Optional[Dict[str, Any]] = None
 
     def evaluate_macro_environment(self, market_data_provider) -> Dict[str, Any]:
@@ -73,6 +79,7 @@ class MacroTrendFilter:
     ) -> Tuple[bool, str]:
         """
         Validates whether a 15-minute long entry is permissible given the macro environment.
+        - If market breadth is unhealthy (< min participation), new long positions are gated to prevent bull-trap entries.
         - If the broad market is in a Daily downtrend, long trades are blocked UNLESS the
           stock exhibits strong relative strength (holding above its own Daily 21 EMA).
         """
@@ -81,6 +88,13 @@ class MacroTrendFilter:
 
         state = macro_state or self._cached_macro_state
         inverse_etfs = getattr(Config, "INVERSE_ETFS", ["SH", "PSQ"])
+
+        # Market breadth gate
+        if state and "breadth" in state:
+            breadth = state["breadth"]
+            if not breadth.get("healthy_breadth", True) and symbol not in inverse_etfs:
+                return False, f"Macro Breadth Gate: {breadth.get('reason')}"
+
         if not state or not state.get("is_bearish"):
             if symbol in inverse_etfs:
                 return False, f"Macro Filter: Inverse ETF {symbol} blocked because market is bullish/neutral"
