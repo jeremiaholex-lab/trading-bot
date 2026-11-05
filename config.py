@@ -70,8 +70,14 @@ class Config:
     PROFIT_TARGET_RR: float = float(os.getenv("PROFIT_TARGET_RR", "2.0")) # 2:1 Reward to Risk ratio
     MIN_CASH_BUFFER_PCT: float = 0.10 # Keep at least 10% in cash
 
+    # Dynamic Universe Screening (In-play & High-Alpha Selection)
+    ENABLE_DYNAMIC_UNIVERSE_SCREENER: bool = os.getenv("ENABLE_DYNAMIC_UNIVERSE_SCREENER", "True").lower() in ("true", "1", "yes")
+    SCREENER_MIN_RVOL: float = float(os.getenv("SCREENER_MIN_RVOL", "1.1"))
+    SCREENER_MIN_ATR_PCT: float = float(os.getenv("SCREENER_MIN_ATR_PCT", "0.012"))
+
     # Sector & Correlation Exposure Control
     MAX_POSITIONS_PER_SECTOR: int = int(os.getenv("MAX_POSITIONS_PER_SECTOR", "2"))
+    MAX_PORTFOLIO_CORRELATION: float = float(os.getenv("MAX_PORTFOLIO_CORRELATION", "0.75"))
     SECTOR_MAP: dict = {
         "SPY": "INDEX",
         "QQQ": "TECH_INDEX",
@@ -89,9 +95,13 @@ class Config:
     INVERSE_ETF_MAP: dict = {"SPY": "SH", "QQQ": "PSQ"}
     INVERSE_ETFS: list = ["SH", "PSQ"]
 
-    # Event Risk & Earnings Blackout
+    # Event Risk & Earnings / Macro Blackout
     ENABLE_EARNINGS_FILTER: bool = os.getenv("ENABLE_EARNINGS_FILTER", "True").lower() in ("true", "1", "yes")
     EARNINGS_BLACKOUT_DAYS: int = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
+    ENABLE_MACRO_CALENDAR_FILTER: bool = os.getenv("ENABLE_MACRO_CALENDAR_FILTER", "True").lower() in ("true", "1", "yes")
+    MACRO_BLACKOUT_MINUTES_BEFORE: int = int(os.getenv("MACRO_BLACKOUT_MINUTES_BEFORE", "30"))
+    MACRO_BLACKOUT_MINUTES_AFTER: int = int(os.getenv("MACRO_BLACKOUT_MINUTES_AFTER", "30"))
+    MAX_SPREAD_PCT: float = float(os.getenv("MAX_SPREAD_PCT", "0.0015")) # 0.15% max relative spread
 
     # Breaking-News / Event-Risk Gate
     #

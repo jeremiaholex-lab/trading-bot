@@ -2,6 +2,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
 import pandas as pd
 from indicators.technicals import TechnicalIndicators
+from .mean_reversion_sleeve import MeanReversionSleeve
 
 @dataclass
 class TradeSignal:
@@ -44,8 +45,13 @@ class AdaptiveStrategy:
     Adapts parameters dynamically based on market volatility and feedback loops.
     """
 
-    def __init__(self, params: Optional[StrategyParameters] = None):
+    def __init__(
+        self,
+        params: Optional[StrategyParameters] = None,
+        mean_reversion_sleeve: Optional[MeanReversionSleeve] = None
+    ):
         self.params = params or StrategyParameters()
+        self.mean_reversion_sleeve = mean_reversion_sleeve or MeanReversionSleeve()
 
     def update_params(self, new_params: StrategyParameters):
         self.params = new_params
@@ -143,17 +149,26 @@ class AdaptiveStrategy:
         # -------------------------------------------------------------
         # 3. Ranging Regime: Mean Reversion
         # -------------------------------------------------------------
-        elif regime == "RANGING":
-            # Buy when touching Lower Bollinger Band with oversold RSI and bouncing
-            bb_lower = float(curr['BB_Lower'])
-            bb_mid = float(curr['BB_Mid'])
-            at_support = close <= (bb_lower * 1.01)
-            rsi_oversold = rsi <= 35
-
-            if at_support and rsi_oversold and close > prev['Close']:
-                action = "BUY"
-                confidence = 0.70
-                reasons.append(f"Mean-reversion bounce at lower Bollinger Band (RSI: {rsi:.1f})")
+        elif regime == "RANGING" or regime == "CHOPPY":
+            if hasattr(self, "mean_reversion_sleeve") and self.mean_reversion_sleeve:
+                mr_action, mr_conf, mr_reason, mr_meta = self.mean_reversion_sleeve.evaluate_mean_reversion_setup(
+                    symbol=symbol,
+                    df_ind=df_ind,
+                    atr=atr
+                )
+                if mr_action != "HOLD":
+                    action = mr_action
+                    confidence = mr_conf
+                    reasons.append(mr_reason)
+            else:
+                # Fallback basic mean reversion
+                bb_lower = float(curr['BB_Lower'])
+                at_support = close <= (bb_lower * 1.01)
+                rsi_oversold = rsi <= 35
+                if at_support and rsi_oversold and close > prev['Close']:
+                    action = "BUY"
+                    confidence = 0.70
+                    reasons.append(f"Mean-reversion bounce at lower Bollinger Band (RSI: {rsi:.1f})")
 
         # -------------------------------------------------------------
         # 4. Bearish Trend: Avoid longs or Signal Exit

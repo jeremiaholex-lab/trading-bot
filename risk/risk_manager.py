@@ -6,6 +6,9 @@ from strategy.adaptive_strategy import TradeSignal
 from .earnings_filter import EarningsFilter
 from .news_filter import NewsFilter
 from .congress_filter import CongressFilter
+from .correlation_manager import PortfolioCorrelationManager
+from .macro_calendar_filter import MacroCalendarFilter
+from .spread_filter import BidAskSpreadFilter
 
 # Safety infrastructure
 from safety import KillSwitch, AuditLedger, MandateGate
@@ -44,6 +47,9 @@ class RiskManager:
         kill_switch: Optional[KillSwitch] = None,
         audit_ledger: Optional[AuditLedger] = None,
         mandate_gate: Optional[MandateGate] = None,
+        correlation_manager: Optional[PortfolioCorrelationManager] = None,
+        macro_calendar_filter: Optional[MacroCalendarFilter] = None,
+        spread_filter: Optional[BidAskSpreadFilter] = None
     ):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
@@ -60,6 +66,17 @@ class RiskManager:
         self.kill_switch = kill_switch
         self.audit_ledger = audit_ledger
         self.mandate_gate = mandate_gate
+
+        self.macro_calendar_filter = macro_calendar_filter or MacroCalendarFilter(
+            blackout_minutes_before=getattr(Config, "MACRO_BLACKOUT_MINUTES_BEFORE", 30),
+            blackout_minutes_after=getattr(Config, "MACRO_BLACKOUT_MINUTES_AFTER", 30)
+        )
+        self.correlation_manager = correlation_manager or PortfolioCorrelationManager(
+            max_allowed_correlation=getattr(Config, "MAX_PORTFOLIO_CORRELATION", 0.75)
+        )
+        self.spread_filter = spread_filter or BidAskSpreadFilter(
+            max_spread_pct=getattr(Config, "MAX_SPREAD_PCT", 0.0015)
+        )
 
     def update_start_of_day_equity(self, current_equity: float):
         """Initializes or resets the benchmark equity for the trading day."""
@@ -96,6 +113,9 @@ class RiskManager:
         current_open_positions_count: int,
         already_holding_symbol: bool,
         open_positions: Optional[Dict[str, Any]] = None,
+        price_history_map: Optional[Dict[str, Any]] = None,
+        bid_price: float = 0.0,
+        ask_price: float = 0.0,
     ) -> PositionSizeResult:
         """
         Calculates exact number of shares to buy using strict volatility risk sizing
@@ -180,6 +200,36 @@ class RiskManager:
                         )
                     )
 
+        # 4b. Dynamic Portfolio Correlation Cap
+        if open_positions and price_history_map and self.correlation_manager:
+            cand_series = price_history_map.get(signal.symbol)
+            if cand_series is not None and hasattr(cand_series, "columns"):
+                close_col = next((c for c in cand_series.columns if str(c).lower() == "close"), None)
+                if close_col:
+                    cand_series = cand_series[close_col]
+            if cand_series is not None:
+                existing_series = {}
+                for open_sym in open_positions:
+                    p_series = price_history_map.get(open_sym)
+                    if p_series is not None:
+                        if hasattr(p_series, "columns"):
+                            c_col = next((c for c in p_series.columns if str(c).lower() == "close"), None)
+                            if c_col:
+                                p_series = p_series[c_col]
+                        existing_series[open_sym] = p_series
+
+                corr_ok, corr_reason = self.correlation_manager.validate_candidate_correlation(
+                    signal.symbol, cand_series, existing_series
+                )
+                if not corr_ok:
+                    return PositionSizeResult(
+                        allowed=False,
+                        shares=0,
+                        cost=0.0,
+                        risk_amount=0.0,
+                        rejection_reason=corr_reason
+                    )
+
         # 5. Binary Event & Earnings Blackout Guard
         if Config.ENABLE_EARNINGS_FILTER and self.earnings_filter:
             in_blackout, earnings_reason = self.earnings_filter.is_in_blackout(
@@ -229,6 +279,34 @@ class RiskManager:
                     cost=0.0,
                     risk_amount=0.0,
                     rejection_reason=f"News Risk: {news_reason}."
+                )
+
+        # 4c. Real-Time Bid-Ask Spread Gate
+        if self.spread_filter and bid_price > 0 and ask_price > 0:
+            spread_ok, spread_reason = self.spread_filter.validate_spread(
+                symbol=signal.symbol,
+                bid_price=bid_price,
+                ask_price=ask_price
+            )
+            if not spread_ok:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Spread Gate: {spread_reason}"
+                )
+
+        # 5b. Macroeconomic Calendar Gate (FOMC / CPI / NFP)
+        if getattr(Config, "ENABLE_MACRO_CALENDAR_FILTER", True) and self.macro_calendar_filter:
+            in_macro_blackout, macro_reason = self.macro_calendar_filter.is_in_macro_blackout()
+            if in_macro_blackout:
+                return PositionSizeResult(
+                    allowed=False,
+                    shares=0,
+                    cost=0.0,
+                    risk_amount=0.0,
+                    rejection_reason=f"Macro Calendar Gate: {macro_reason}."
                 )
 
         # 6. Minimum confidence filter

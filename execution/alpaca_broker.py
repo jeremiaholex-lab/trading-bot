@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, TypeVar
+from typing import Dict, List, Optional, Any, Callable, TypeVar, Tuple
 from config import Config
 
 # Safety infrastructure imports
@@ -321,6 +321,33 @@ class AlpacaBroker:
         self.is_simulated = False
         mode_str = "LIVE" if Config.ALPACA_LIVE else "ALPACA_PAPER"
         logger.info(f"Connected to Alpaca ({mode_str}). Account #{account.account_number}, Equity: ${float(account.equity):,.2f}")
+
+    def get_latest_quote(self, symbol: str) -> Tuple[float, float]:
+        """
+        Retrieves current real-time bid and ask quotes for a symbol.
+        Returns (bid_price, ask_price).
+        """
+        if not self.is_simulated and self.client:
+            try:
+                from alpaca.data.historical import StockHistoricalDataClient
+                from alpaca.data.requests import StockLatestQuoteRequest
+
+                data_client = StockHistoricalDataClient(
+                    api_key=Config.ALPACA_API_KEY,
+                    secret_key=Config.ALPACA_SECRET_KEY
+                )
+                req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+                quotes = data_client.get_stock_latest_quote(req)
+                if symbol in quotes:
+                    q = quotes[symbol]
+                    return float(q.bid_price or 0.0), float(q.ask_price or 0.0)
+            except Exception as e:
+                logger.debug(f"Could not fetch Alpaca live quote for {symbol}: {e}")
+
+        # Simulator fallback: tight simulated quote around last known price
+        pos = self.sim_positions.get(symbol)
+        ref_price = pos.current_price if pos else 100.0
+        return round(ref_price * 0.9998, 2), round(ref_price * 1.0002, 2)
 
     def get_market_clock(self) -> Dict[str, Any]:
         """
