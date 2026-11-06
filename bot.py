@@ -1151,8 +1151,16 @@ class TradingBotOrchestrator:
 
                         if needs_calibration:
                             console.print("\n[bold cyan]🔄 Pre-Market Calibration: Tuning strategy parameters...[/bold cyan]")
-                            self.run_self_improvement_cycle()
-                            last_opt_time = time.time()
+                            # A calibration failure must not kill the trading
+                            # loop: the bot trades with the existing (possibly
+                            # stale) parameters and the scheduled cycle
+                            # retries later. Logging loudly, staying alive.
+                            try:
+                                self.run_self_improvement_cycle()
+                                last_opt_time = time.time()
+                            except Exception as e:
+                                logger.error(f"Pre-market calibration failed: {e}", exc_info=True)
+                                console.print(f"[bold red]❌ Calibration failed ({e}) — trading with current parameters.[/bold red]")
 
                 # ── Active Trading Cycle ────────────────────────────
                 cycle_count += 1
@@ -1164,11 +1172,20 @@ class TradingBotOrchestrator:
                 self.scan_and_trade()
                 self._write_heartbeat()
 
-                # Periodic background self-improvement during the session
+                # Periodic background self-improvement during the session.
+                # Guarded: a failed calibration must not take the loop down
+                # mid-trading — the next scheduled cycle retries.
                 if Config.ENABLE_SELF_IMPROVEMENT and (time.time() - last_opt_time) >= opt_interval_seconds:
                     console.print("\n[bold magenta]⏰ Scheduled Self-Improvement Cycle Triggered...[/bold magenta]")
-                    self.run_self_improvement_cycle()
-                    last_opt_time = time.time()
+                    try:
+                        self.run_self_improvement_cycle()
+                        last_opt_time = time.time()
+                    except Exception as e:
+                        logger.error(f"Scheduled self-improvement cycle failed: {e}", exc_info=True)
+                        # Back off an hour instead of retrying on every scan
+                        # cycle: a failing calibration would otherwise
+                        # re-run the full watchlist optimization every 60s.
+                        last_opt_time = time.time() - (opt_interval_seconds - 3600)
 
                 console.print(f"\n[dim]Next market scan in {interval_seconds}s... (Press Ctrl+C to stop)[/dim]")
                 time.sleep(interval_seconds)

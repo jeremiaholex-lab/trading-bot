@@ -186,6 +186,10 @@ class Config:
     # non-reproducibly.
     OPTIMIZER_SEED: int = int(os.getenv("OPTIMIZER_SEED", "42"))
 
+    # The benchmark whose returns the optimizer scores alpha against, so the
+    # search cannot mistake riding a bull market for edge.
+    BENCHMARK_SYMBOL: str = os.getenv("BENCHMARK_SYMBOL", "SPY").strip().upper()
+
     # ===== SAFETY INFRASTRUCTURE (Vibe-Trading inspired) =====
 
     # Mandate Gate Configuration
