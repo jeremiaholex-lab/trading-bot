@@ -2,7 +2,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple, Any, List
 from config import Config
-from strategy.adaptive_strategy import TradeSignal
+from strategy.adaptive_strategy import TradeSignal, MIN_ENTRY_CONFIDENCE
 from .earnings_filter import EarningsFilter
 from .news_filter import NewsFilter
 from .congress_filter import CongressFilter
@@ -310,13 +310,16 @@ class RiskManager:
                 )
 
         # 6. Minimum confidence filter
-        if signal.confidence < 0.60:
+        if signal.confidence < MIN_ENTRY_CONFIDENCE:
             return PositionSizeResult(
                 allowed=False,
                 shares=0,
                 cost=0.0,
                 risk_amount=0.0,
-                rejection_reason=f"Signal confidence {signal.confidence:.2f} below threshold 0.60."
+                rejection_reason=(
+                    f"Signal confidence {signal.confidence:.2f} below threshold "
+                    f"{MIN_ENTRY_CONFIDENCE:.2f}."
+                )
             )
 
         entry = signal.entry_price
