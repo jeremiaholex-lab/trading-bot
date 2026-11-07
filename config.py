@@ -227,6 +227,20 @@ class Config:
     SIM_LATENCY_SIGMA_MS: float = float(os.getenv("SIM_LATENCY_SIGMA_MS", "20.0"))
     SIM_LATENCY_FILL_MS: float = float(os.getenv("SIM_LATENCY_FILL_MS", "30.0"))
 
+    # Trading costs charged on every simulated backtest / optimizer fill.
+    # A backtest with no costs flatters a strategy whose edge per trade is a
+    # few tenths of a percent. Slippage defaults to the paper simulator's base
+    # figure so a backtest and a paper run are charged comparable costs.
+    # Commission is per side. Alpaca charges $0 commission, but the sell side
+    # carries SEC/FINRA regulatory fees (well under 1 bp) and other brokers
+    # charge more, so 1 bp is a deliberately conservative default. Set the
+    # commission values to 0 to model Alpaca alone.
+    BACKTEST_SLIPPAGE_BPS: float = float(os.getenv("BACKTEST_SLIPPAGE_BPS", "5.0"))
+    BACKTEST_COMMISSION_BPS: float = float(os.getenv("BACKTEST_COMMISSION_BPS", "1.0"))
+    BACKTEST_COMMISSION_PER_SHARE: float = float(os.getenv("BACKTEST_COMMISSION_PER_SHARE", "0.0"))
+    # Stop-market and signal exits pay slippage; take-profit limit fills do not.
+    BACKTEST_EXIT_SLIPPAGE: bool = os.getenv("BACKTEST_EXIT_SLIPPAGE", "True").lower() in ("true", "1", "yes")
+
     # Order Execution Variety
     DEFAULT_ORDER_TYPE: str = os.getenv("DEFAULT_ORDER_TYPE", "market").strip().lower()
     TWAP_SLICES: int = int(os.getenv("TWAP_SLICES", "5"))
@@ -370,6 +384,12 @@ class Config:
             errors.append(f"SIM_MIN_SLIPPAGE_BPS must be >= 0 (got {cls.SIM_MIN_SLIPPAGE_BPS})")
         if cls.SIM_MAX_SLIPPAGE_BPS < cls.SIM_MIN_SLIPPAGE_BPS:
             errors.append(f"SIM_MAX_SLIPPAGE_BPS must be >= SIM_MIN_SLIPPAGE_BPS (got {cls.SIM_MAX_SLIPPAGE_BPS} < {cls.SIM_MIN_SLIPPAGE_BPS})")
+
+        # Backtest trading costs cannot be negative (a negative cost would
+        # reward trading and silently inflate every result).
+        for name in ("BACKTEST_SLIPPAGE_BPS", "BACKTEST_COMMISSION_BPS", "BACKTEST_COMMISSION_PER_SHARE"):
+            if getattr(cls, name) < 0:
+                errors.append(f"{name} must be >= 0 (got {getattr(cls, name)})")
 
         # The optimisation timeframe must be one the data layer can serve.
         if cls.OPTIMIZATION_TIMEFRAME not in cls.VALID_TIMEFRAMES:

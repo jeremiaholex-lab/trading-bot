@@ -194,6 +194,10 @@ Everything lives in `.env` (copy from `.env.example`). `config.py` validates it 
 | `SIM_MIN_SLIPPAGE_BPS` | `0.5` | Floor — no fill is better than mid |
 | `SIM_MAX_SLIPPAGE_BPS` | `150.0` | Cap — prevents unrealistic fills |
 | `SIM_EXIT_SLIPPAGE` | `False` | Apply the model to exits as well as entries |
+| `BACKTEST_SLIPPAGE_BPS` | `5.0` | Backtester slippage per market-type fill (entries, stops, signal exits) |
+| `BACKTEST_COMMISSION_BPS` | `1.0` | Backtester commission per side, in bps of notional |
+| `BACKTEST_COMMISSION_PER_SHARE` | `0.0` | Optional extra per-share commission per side |
+| `BACKTEST_EXIT_SLIPPAGE` | `True` | Charge slippage on stop/signal exits (take-profit limits never slip) |
 
 ---
 
@@ -240,7 +244,7 @@ trading-bot/
 └── tests/                    # Safety, optimizer, risk, wiring, integration
 ```
 
-Each layer has exactly one owner. A change to what the bot buys belongs in `strategy/` and must be mirrored in `optimizer/backtester.py`, so the backtest and the live bot never disagree.
+Each layer has exactly one owner. A change to what the bot buys belongs in `strategy/`. The backtester calls the same `AdaptiveStrategy.signal_from_indicators` the live bot uses (and the same `MIN_ENTRY_CONFIDENCE` cutoff), so there is no second copy of the entry rules to keep in sync. Backtests charge slippage and commission on every fill (`BACKTEST_*` settings).
 
 ---
 
