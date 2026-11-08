@@ -4,6 +4,11 @@ import pandas as pd
 from indicators.technicals import TechnicalIndicators
 from .mean_reversion_sleeve import MeanReversionSleeve
 
+# A BUY below this confidence is rejected by the risk manager, so it is not an
+# entry. Defined here (and imported by both the risk manager and the
+# backtester) so the live bot and the backtest apply the identical cutoff.
+MIN_ENTRY_CONFIDENCE = 0.60
+
 @dataclass
 class TradeSignal:
     action: str              # 'BUY', 'SELL', 'HOLD'
@@ -82,6 +87,21 @@ class AdaptiveStrategy:
             atr_period=self.params.atr_period
         )
 
+        return self.signal_from_indicators(symbol, df_ind)
+
+    def signal_from_indicators(self, symbol: str, df_ind: pd.DataFrame) -> TradeSignal:
+        """
+        Decides what to do on the LAST row of an indicator-enriched frame.
+
+        This is the single source of truth for entry/exit signals. The live
+        bot reaches it through `generate_signal` (which computes indicators
+        first); the backtester computes indicators once for the whole history
+        and calls this directly for each bar, passing the frame up to and
+        including that bar. Only the last two rows are read, so a window of
+        recent rows gives the same answer as the full history (the mean-
+        reversion sleeve needs at least 25 rows). Because both paths run this
+        exact code, a backtest cannot drift away from what the bot trades.
+        """
         curr = df_ind.iloc[-1]
         prev = df_ind.iloc[-2]
 

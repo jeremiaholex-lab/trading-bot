@@ -1001,6 +1001,7 @@ class TradingBotOrchestrator:
         bt_table.add_row("Profit Factor", f"{res.profit_factor:.2f}")
         bt_table.add_row("Total Return", f"{res.total_pnl_pct:+.2f}%")
         bt_table.add_row("Alpha vs Benchmark", f"{res.alpha_pct:+.2f}%")
+        bt_table.add_row("Trading Costs (in results)", f"{res.cost_drag_pct:.2f}% of notional")
         bt_table.add_row("Max Drawdown", f"{res.max_drawdown_pct:.2f}%")
         bt_table.add_row("Annualized Sharpe Ratio", f"{res.sharpe_ratio:.2f}")
         bt_table.add_row("Overall Fitness Score", f"{res.fitness_score:.2f}")
