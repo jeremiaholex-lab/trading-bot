@@ -2122,6 +2122,12 @@ themeSelect.addEventListener("change", () => {
 });
 $("logFilter").addEventListener("change", paintLogs);
 $("logClear").addEventListener("click", () => { S.logRows = []; paintLogs(); renderRecentEvents(); });
+// Profile selector: switching accounts must re-point every fetch/WebSocket to the
+// other dashboard's port. Without this listener the dropdown changed the visual
+// selection and did nothing — the page kept showing the account it started on.
+$("profileSelect").addEventListener("change", () => {
+  switchProfile($("profileSelect").value);
+});
 
 /* ============================ portfolio history controls ============================ */
 function setActiveButton(btnGroup, value) {
