@@ -26,13 +26,22 @@ class PortfolioCorrelationManager:
         if len(series_a) < min_periods or len(series_b) < min_periods:
             return 0.0
 
-        # Aligns and computes percent returns
-        ret_a = series_a.pct_change().dropna()
-        ret_b = series_b.pct_change().dropna()
+        # Align and compute percent returns. Drop infinities too: zero or
+        # near-zero prices can otherwise create non-finite returns.
+        ret_a = series_a.pct_change().replace([np.inf, -np.inf], np.nan)
+        ret_b = series_b.pct_change().replace([np.inf, -np.inf], np.nan)
 
         # Inner join on index
         df = pd.concat([ret_a, ret_b], axis=1).dropna()
         if len(df) < min_periods:
+            return 0.0
+
+        # Pearson correlation is undefined for a constant return series.
+        # pandas/numpy emits RuntimeWarning in this case; preserve the existing
+        # policy of treating undefined correlations as 0 without warning noise.
+        if not np.isfinite(df.to_numpy(dtype=float)).all():
+            return 0.0
+        if (df.std(axis=0, ddof=0) <= 0).any():
             return 0.0
 
         corr = float(df.iloc[:, 0].corr(df.iloc[:, 1]))

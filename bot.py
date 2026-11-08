@@ -5,6 +5,7 @@ import time
 import argparse
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any
 
 import pandas as pd
@@ -75,7 +76,7 @@ class TradingBotOrchestrator:
         logger.info("Using account profile %s", Config.BOT_PROFILE)
         self.market_data = MarketDataProvider()
         self.broker = AlpacaBroker()
-        self.risk_mgr = RiskManager()
+        self.risk_mgr = RiskManager(state_path=Config.STATE_DIR / "risk_state.json")
         self.self_improver = SelfImprover()
         self.notifier = WebhookNotifier()
         self.macro_filter = MacroTrendFilter()
@@ -446,6 +447,22 @@ class TradingBotOrchestrator:
                     console.print(f"[bold red]🛡️ {sym}: {issue}[/bold red]")
         except Exception as e:
             logger.warning(f"Protective order audit failed: {e}")
+
+        # Never treat an unreachable broker as a flat account. Position state
+        # is part of both exposure sizing and exit management; skip this cycle
+        # when it cannot be reconciled.
+        if hasattr(self.broker, "positions_reconciliation"):
+            reconciliation = self.broker.positions_reconciliation()
+            if not reconciliation.get("ok", False):
+                reason = reconciliation.get("error") or "position state unavailable"
+                self._record_session_warning(
+                    f"Broker positions are unreconciled; skipping trading cycle: {reason}"
+                )
+                logger.critical(
+                    "Skipping trading cycle because broker positions could not be reconciled: %s",
+                    reason,
+                )
+                return []
 
         scan_table = Table(title="📈 Market Scanner & Quantitative Edge Analysis")
         scan_table.add_column("Symbol", style="bold cyan")
@@ -1119,16 +1136,17 @@ class TradingBotOrchestrator:
                     continue
 
                 # ── New Trading Day Reset ───────────────────────────
-                today = datetime.now(timezone.utc).date()
+                today = datetime.now(ZoneInfo("America/New_York")).date()
                 if current_trading_date != today:
                     current_trading_date = today
                     console.print(f"\n[bold green]📅 New Trading Day: {today.isoformat()}[/bold green]")
 
-                    # Reset daily circuit breaker
+                    # Reset (or preserve across restart) the session risk
+                    # baseline using the exchange's calendar date.
                     acc = self.broker.get_account_summary()
-                    self.risk_mgr.start_of_day_equity = None
-                    self.risk_mgr.circuit_breaker_tripped = False
-                    self.risk_mgr.update_start_of_day_equity(acc['equity'])
+                    self.risk_mgr.update_start_of_day_equity(
+                        acc['equity'], session_date=today.isoformat()
+                    )
                     logger.info(f"Daily reset complete. Start-of-day equity: ${acc['equity']:,.2f}")
 
                     # Prune or reset scale-out state for closed positions

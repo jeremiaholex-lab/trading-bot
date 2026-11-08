@@ -8,6 +8,7 @@ import pytest
 
 from config import Config
 from execution.trade_journal import TradeJournal
+from safety.audit_ledger import AuditLedger
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +20,19 @@ def _isolate_implicit_trade_journal(tmp_path, monkeypatch):
         original_init(journal, db_path=test_db_path)
 
     monkeypatch.setattr(TradeJournal, "__init__", init_with_test_database)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_implicit_audit_ledger(tmp_path, monkeypatch):
+    """Keep tests from loading or modifying the developer's runtime ledger."""
+    original_init = AuditLedger.__init__
+
+    def init_with_test_ledger(ledger, ledger_dir=None, max_entries_per_file=10000):
+        isolated_dir = ledger_dir if ledger_dir is not None else tmp_path / "audit_ledger"
+        original_init(ledger, ledger_dir=isolated_dir, max_entries_per_file=max_entries_per_file)
+
+    monkeypatch.setattr(AuditLedger, "__init__", init_with_test_ledger)
     yield
 
 

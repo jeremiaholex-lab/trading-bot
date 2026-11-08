@@ -36,6 +36,12 @@ def test_circuit_breaker_tripped(risk_mgr):
     assert tripped is True
     assert risk_mgr.circuit_breaker_tripped is True
 
+def test_circuit_breaker_stays_latched_after_equity_recovers(risk_mgr):
+    assert risk_mgr.check_circuit_breaker(96000.0) is True
+    assert risk_mgr.check_circuit_breaker(100500.0) is True
+    assert risk_mgr.circuit_breaker_tripped is True
+
+
 def test_circuit_breaker_blocks_trading(risk_mgr, sample_buy_signal):
     risk_mgr.check_circuit_breaker(96000.0)
     res = risk_mgr.calculate_position_size(
@@ -47,6 +53,37 @@ def test_circuit_breaker_blocks_trading(risk_mgr, sample_buy_signal):
     )
     assert res.allowed is False
     assert "circuit breaker" in res.rejection_reason.lower()
+
+def test_daily_breaker_baseline_and_latch_survive_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(RiskManager, "_today_et", staticmethod(lambda: "2099-01-02"))
+    state_path = tmp_path / "risk_state.json"
+    first = RiskManager(state_path=state_path)
+    first.update_start_of_day_equity(100000.0, session_date="2099-01-02")
+    assert first.check_circuit_breaker(96000.0) is True
+
+    restored = RiskManager(state_path=state_path)
+    restored.update_start_of_day_equity(105000.0, session_date="2099-01-02")
+    assert restored.start_of_day_equity == 100000.0
+    assert restored.check_circuit_breaker(105000.0) is True
+
+
+def test_corrupt_same_day_risk_state_blocks_entries(tmp_path, monkeypatch):
+    state_path = tmp_path / "risk_state.json"
+    state_path.write_text("not json", encoding="utf-8")
+    monkeypatch.setattr(RiskManager, "_today_et", staticmethod(lambda: "2099-01-02"))
+    risk_mgr = RiskManager(state_path=state_path)
+    risk_mgr.update_start_of_day_equity(100000.0, session_date="2099-01-02")
+
+    assert risk_mgr.check_circuit_breaker(100000.0) is True
+
+
+def test_breaker_state_write_failure_fails_closed(tmp_path):
+    blocked_parent = tmp_path / "not_a_directory"
+    blocked_parent.write_text("block", encoding="utf-8")
+    risk_mgr = RiskManager(state_path=blocked_parent / "risk_state.json")
+    risk_mgr.update_start_of_day_equity(100000.0, session_date="2099-01-02")
+    assert risk_mgr.check_circuit_breaker(100000.0) is True
+
 
 def test_position_sizing_within_risk_cap(risk_mgr, sample_buy_signal):
     # 1.5% max risk on 100,000 equity = $1,500

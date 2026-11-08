@@ -1,4 +1,9 @@
+import json
 import logging
+import math
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple, Any, List
 from config import Config
@@ -49,13 +54,18 @@ class RiskManager:
         mandate_gate: Optional[MandateGate] = None,
         correlation_manager: Optional[PortfolioCorrelationManager] = None,
         macro_calendar_filter: Optional[MacroCalendarFilter] = None,
-        spread_filter: Optional[BidAskSpreadFilter] = None
+        spread_filter: Optional[BidAskSpreadFilter] = None,
+        state_path: Optional[Path] = None,
     ):
         self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PER_TRADE
         self.max_positions = Config.MAX_OPEN_POSITIONS
         self.daily_drawdown_limit = Config.DAILY_DRAWDOWN_LIMIT
         self.start_of_day_equity: Optional[float] = None
         self.circuit_breaker_tripped: bool = False
+        self.session_date: Optional[str] = None
+        self.state_path = state_path
+        self._daily_state_untrusted = False
+        self._load_daily_state()
         self.earnings_filter = earnings_filter or EarningsFilter()
         self.news_filter = news_filter or NewsFilter(
             sec_user_agent=getattr(Config, "SEC_USER_AGENT", "")
@@ -78,19 +88,87 @@ class RiskManager:
             max_spread_pct=getattr(Config, "MAX_SPREAD_PCT", 0.0015)
         )
 
-    def update_start_of_day_equity(self, current_equity: float):
-        """Initializes or resets the benchmark equity for the trading day."""
-        if self.start_of_day_equity is None:
-            self.start_of_day_equity = current_equity
+    @staticmethod
+    def _today_et() -> str:
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+    def _load_daily_state(self) -> None:
+        """Restore today's loss baseline and latch across process restarts."""
+        if self.state_path is None:
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not {
+                "session_date", "start_of_day_equity", "circuit_breaker_tripped"
+            }.issubset(data):
+                raise ValueError("risk state is missing required fields")
+            if data.get("session_date") != self._today_et():
+                return
+            baseline = float(data["start_of_day_equity"])
+            if not math.isfinite(baseline) or baseline <= 0:
+                return
+            self.start_of_day_equity = baseline
+            self.session_date = data["session_date"]
+            self.circuit_breaker_tripped = bool(data.get("circuit_breaker_tripped", False))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+            # A malformed same-session state may have contained a tripped
+            # breaker. Fail closed until the next session establishes fresh state.
+            self._daily_state_untrusted = True
+            self.session_date = self._today_et()
+            logger.critical("Could not restore daily risk state from %s: %s", self.state_path, exc)
+
+    def _save_daily_state(self) -> bool:
+        if self.state_path is None:
+            return True
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({
+                "session_date": self.session_date,
+                "start_of_day_equity": self.start_of_day_equity,
+                "circuit_breaker_tripped": self.circuit_breaker_tripped,
+            }, indent=2), encoding="utf-8")
+            tmp.replace(self.state_path)
+            self._daily_state_untrusted = False
+            return True
+        except OSError as exc:
+            # Never continue entering if a breaker/baseline cannot survive restart.
+            self._daily_state_untrusted = True
+            logger.critical("Could not persist daily risk state: %s", exc)
+            return False
+
+    def update_start_of_day_equity(self, current_equity: float, session_date: Optional[str] = None):
+        """Initialize today's baseline once; reset only when the session changes."""
+        session_date = session_date or self._today_et()
+        if not isinstance(current_equity, (int, float)) or not math.isfinite(current_equity) or current_equity <= 0:
+            logger.error("Refusing invalid start-of-day equity: %s", current_equity)
+            return
+        # A corrupt/unwritable state for the current session must not be
+        # silently replaced by a fresh baseline on process startup.
+        if self._daily_state_untrusted and self.session_date == session_date and self.start_of_day_equity is None:
+            return
+        if self.session_date != session_date or self.start_of_day_equity is None:
+            self.session_date = session_date
+            self.start_of_day_equity = float(current_equity)
+            self.circuit_breaker_tripped = False
+            self._save_daily_state()
 
     def check_circuit_breaker(self, current_equity: float) -> bool:
         """
         Returns True if the circuit breaker is tripped due to daily drawdown limit.
         Halts all new entry orders.
         """
+        if self._daily_state_untrusted or self.circuit_breaker_tripped:
+            return True
+        if not isinstance(current_equity, (int, float)) or not math.isfinite(current_equity) or current_equity <= 0:
+            logger.critical("Invalid account equity for drawdown check: %s", current_equity)
+            self._daily_state_untrusted = True
+            return True
         if self.start_of_day_equity is None or self.start_of_day_equity <= 0:
-            self.start_of_day_equity = current_equity
-            return False
+            self.update_start_of_day_equity(current_equity)
+            return self.circuit_breaker_tripped
 
         drawdown = (self.start_of_day_equity - current_equity) / self.start_of_day_equity
         if drawdown >= self.daily_drawdown_limit:
@@ -100,9 +178,10 @@ class RiskManager:
                     f"exceeds limit {self.daily_drawdown_limit*100:.2f}%. Halting new entries."
                 )
                 self.circuit_breaker_tripped = True
+                self._save_daily_state()
             return True
 
-        self.circuit_breaker_tripped = False
+        # Once hit, the daily breaker remains latched until the next session.
         return False
 
     def calculate_position_size(

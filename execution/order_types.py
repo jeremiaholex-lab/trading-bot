@@ -211,8 +211,9 @@ class SimpleOrderExecutor:
                 order_class=OrderClass.BRACKET,
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                 stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                client_order_id=f"bot-{uuid.uuid4().hex}",
             )
-            order = self._broker.client.submit_order(req)
+            order = self._broker._submit_order_once(req, f"limit_buy({symbol})")
             logger.info(f"[LIMIT] Submitted limit buy {symbol} qty={qty} @ {limit_price:.2f} → {order.id}")
             return OrderResult(
                 success=True,
@@ -269,8 +270,9 @@ class SimpleOrderExecutor:
                 order_class=OrderClass.BRACKET,
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                 stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                client_order_id=f"bot-{uuid.uuid4().hex}",
             )
-            order = self._broker.client.submit_order(req)
+            order = self._broker._submit_order_once(req, f"stop_limit_buy({symbol})")
             logger.info(
                 f"[STOP-LIMIT] Submitted stop-limit buy {symbol} qty={qty} "
                 f"stop={stop_price:.2f} limit={limit_price:.2f} → {order.id}"

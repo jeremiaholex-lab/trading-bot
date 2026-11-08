@@ -19,7 +19,8 @@ Mandate answers "is this allowed?". They are separate layers.
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from enum import Enum
 from typing import Dict, List, Optional, Set, Any
@@ -132,6 +133,7 @@ class MandateGate:
         self._daily_notional_usd: float = 0.0
         self._daily_order_count: int = 0
         self._daily_trade_count: int = 0
+        self._daily_symbol_notional: Dict[str, float] = {}
         self._last_reset_date: Optional[str] = None
         self._load_daily_counters()
 
@@ -173,20 +175,40 @@ class MandateGate:
         """Load daily counters from audit ledger if available."""
         if self.audit_ledger:
             try:
-                today = datetime.now(timezone.utc).date().isoformat()
-                entries = self.audit_ledger.get_entries_for_date(today)
-                self._daily_notional_usd = sum(
-                    e.details.get('notional_usd', 0)
-                    for e in entries
-                    if e.entry_type == 'order_submitted'
-                )
-                self._daily_order_count = sum(
-                    1 for e in entries if e.entry_type == 'order_submitted'
-                )
-                self._daily_trade_count = sum(
-                    1 for e in entries if e.entry_type == 'trade_filled'
-                )
-                self._last_reset_date = today
+                session_date = datetime.now(ZoneInfo("America/New_York")).date()
+                session_start = datetime.combine(
+                    session_date, datetime.min.time(), tzinfo=ZoneInfo("America/New_York")
+                ).astimezone(timezone.utc)
+                session_end = session_start + timedelta(days=1)
+                utc_dates = {
+                    session_start.date().isoformat(),
+                    (session_start.date() + timedelta(days=1)).isoformat(),
+                }
+                entries = [
+                    entry
+                    for day in sorted(utc_dates)
+                    for entry in self.audit_ledger.get_entries_for_date(day)
+                ]
+                submitted = [
+                    e for e in entries
+                    if getattr(e.entry_type, "value", e.entry_type) == "order_submitted"
+                    and str(e.side or "").lower() == "buy"
+                    and session_start <= datetime.fromisoformat(e.timestamp) < session_end
+                ]
+                self._daily_notional_usd = sum(float(e.notional_usd or 0.0) for e in submitted)
+                self._daily_order_count = len(submitted)
+                # Count submitted entry orders conservatively as trades so the
+                # cap is effective even when fills arrive asynchronously.
+                self._daily_trade_count = len(submitted)
+                self._daily_symbol_notional = {}
+                for entry in submitted:
+                    if entry.symbol:
+                        symbol = entry.symbol.upper()
+                        self._daily_symbol_notional[symbol] = (
+                            self._daily_symbol_notional.get(symbol, 0.0)
+                            + float(entry.notional_usd or 0.0)
+                        )
+                self._last_reset_date = session_date.isoformat()
                 logger.info(f"Loaded daily counters from audit ledger: "
                            f"notional=${self._daily_notional_usd:,.2f}, "
                            f"orders={self._daily_order_count}, "
@@ -196,11 +218,12 @@ class MandateGate:
 
     def _reset_daily_counters_if_needed(self):
         """Reset daily counters at the start of a new trading day."""
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
         if self._last_reset_date != today:
             self._daily_notional_usd = 0.0
             self._daily_order_count = 0
             self._daily_trade_count = 0
+            self._daily_symbol_notional = {}
             self._last_reset_date = today
             logger.info(f"Daily mandate counters reset for {today}")
 
@@ -420,28 +443,26 @@ class MandateGate:
         return False
 
     def _get_symbol_daily_notional(self, symbol: str) -> float:
-        """Get aggregate notional for a symbol today from audit ledger."""
-        if not self.audit_ledger:
-            return 0.0
-        try:
-            today = datetime.now(timezone.utc).date().isoformat()
-            entries = self.audit_ledger.get_entries_for_date(today)
-            return sum(
-                e.details.get('notional_usd', 0)
-                for e in entries
-                if e.details.get('symbol') == symbol and e.entry_type == 'order_submitted'
-            )
-        except Exception:
-            return 0.0
+        """Get aggregate entry notional for this symbol in the current session."""
+        return self._daily_symbol_notional.get(symbol.upper(), 0.0)
 
     def record_order_submitted(self, symbol: str, notional_usd: float):
-        """Record an order submission for daily counter tracking."""
+        """Record an accepted entry order for daily cap tracking.
+
+        Count it conservatively as a trade intent: fills can arrive
+        asynchronously and a restart must not reset the daily limit.
+        """
         self._daily_notional_usd += notional_usd
         self._daily_order_count += 1
+        self._daily_trade_count += 1
+        symbol = symbol.upper()
+        self._daily_symbol_notional[symbol] = self._daily_symbol_notional.get(symbol, 0.0) + notional_usd
 
     def record_trade_filled(self, symbol: str, notional_usd: float):
-        """Record a trade fill for daily counter tracking."""
-        self._daily_trade_count += 1
+        """Record a confirmed fill when a caller has fill-level evidence."""
+        # Entry caps already count the submitted order; avoid counting a fill
+        # twice. Retained for integrations that track fills separately.
+        return None
 
     def get_daily_summary(self) -> Dict:
         """Get current daily counter status."""

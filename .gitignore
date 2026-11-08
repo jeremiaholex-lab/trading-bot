@@ -65,3 +65,5 @@ validation/paper_forward_journal.json
 # Runtime state: audit ledger + kill switch (never commit)
 audit_ledger/
 kill_switch_state.json
+risk_state.json
+risk_state.tmp

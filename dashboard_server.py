@@ -184,6 +184,9 @@ def payload_ts() -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Warm up data fetcher in background so the first UI request is instant
+    asyncio.create_task(asyncio.to_thread(_safe, df.fetch_overview, "initial_overview_warmup"))
+    asyncio.create_task(asyncio.to_thread(_safe, df.get_workflow, "initial_workflow_warmup"))
     tasks = [asyncio.create_task(overview_loop()), asyncio.create_task(workflow_loop())]
     logger.info("dashboard ready")
     try:
@@ -387,7 +390,7 @@ async def ws_endpoint(ws: WebSocket):
         # Immediate snapshot so the UI is never empty on first load
         payload = await asyncio.to_thread(df.fetch_overview)
         payload["type"] = "overview"
-        await ws.send_text(json.dumps(payload, default=str))
+        await ws.send_text(json.dumps(_clean(payload), default=str))
 
         slow = {
             "type": "slow",
@@ -397,7 +400,7 @@ async def ws_endpoint(ws: WebSocket):
             "trade_summary": await asyncio.to_thread(_safe, df.get_trade_summary, "trade_summary"),
             "analytics": await asyncio.to_thread(_safe, df.get_analytics, "analytics"),
         }
-        await ws.send_text(json.dumps(slow, default=str))
+        await ws.send_text(json.dumps(_clean(slow), default=str))
 
         while True:
             # Drain client pings; disconnect surfaces as WebSocketDisconnect.

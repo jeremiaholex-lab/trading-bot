@@ -42,6 +42,44 @@ def parse_dashboard():
     return source, parser
 
 
+def test_mobile_navigation_uses_an_accessible_drawer_not_a_sticky_bar():
+    source, page = parse_dashboard()
+    css = source.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    assert {"navToggle", "dashboardNav", "railBackdrop"} <= set(page.ids)
+    assert 'aria-controls="dashboardNav"' in source
+    mobile_rules = css.split("@media(max-width:900px)", 1)[1].split("@media(max-width:760px)", 1)[0]
+    assert ".rail{position:fixed" in mobile_rules
+    assert ".rail.is-open" in mobile_rules
+    assert ".rail{position:sticky" not in mobile_rules
+
+
+def test_mobile_navigation_closes_on_escape_and_section_selection():
+    source, _ = parse_dashboard()
+
+    assert 'event.key === "Escape"' in source
+    assert 'dashboardNav.querySelectorAll("a[href^=\'#\']")' in source
+    assert 'setNavigationOpen(false, false)' in source
+
+
+def test_liveness_from_overview_updates_header_and_duplicate_alerts():
+    source, _ = parse_dashboard()
+    overview = source.split("function applyOverview(d)", 1)[1].split("function applySlow(d)", 1)[0]
+
+    assert 'd.liveness && !d.liveness.error' in overview
+    assert 'S.liveness = d.liveness' in overview
+
+
+def test_websocket_failure_falls_back_to_http_refresh():
+    source, _ = parse_dashboard()
+    fallback = source.split("function startPolling()", 1)[1].split("function resolveAutoTimeframe()", 1)[0]
+
+    assert 'getJSON("/api/overview", generation)' in fallback
+    assert 'getJSON("/api/workflow", generation)' in fallback
+    assert "setInterval(refresh, 5000)" in fallback
+    assert "Dashboard connection lost" in fallback
+
+
 def test_navigation_links_resolve_to_unique_section_ids():
     _, page = parse_dashboard()
 

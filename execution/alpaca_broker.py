@@ -2,6 +2,7 @@ import json
 import time
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -81,6 +82,10 @@ class OrderResult:
     stop_loss: float
     take_profit: float
     message: str
+
+
+class OrderSubmissionUncertain(RuntimeError):
+    """The broker may have accepted an order whose response was lost."""
 
 
 class BrokerAuthenticationError(RuntimeError):
@@ -279,6 +284,44 @@ class AlpacaBroker:
             tmp.replace(self.state_file)
         except Exception as e:
             logger.error(f"Failed to save simulator state: {e}")
+
+    def _submit_order_once(self, request: Any, operation_name: str) -> Any:
+        """Submit once with a client ID; reconcile ambiguous responses, never retry.
+
+        Blind retries of an order POST can create duplicate positions when the
+        broker accepted the first request but its response timed out.
+        """
+        client_order_id = getattr(request, "client_order_id", None)
+        if not client_order_id:
+            raise ValueError(f"{operation_name} requires a client_order_id")
+        try:
+            return self.client.submit_order(request)
+        except Exception as submit_error:
+            try:
+                lookup = getattr(self.client, "get_order_by_client_id", None)
+                if lookup is None:
+                    lookup = getattr(self.client, "get_order_by_client_order_id", None)
+                if lookup is not None:
+                    order = lookup(client_order_id)
+                    if order is not None:
+                        logger.warning(
+                            "%s response was lost; reconciled accepted order %s by client ID",
+                            operation_name, client_order_id,
+                        )
+                        return order
+            except Exception as lookup_error:
+                logger.error("Could not reconcile %s by client ID: %s", operation_name, lookup_error)
+
+            # Without authoritative broker confirmation, halt all new entries.
+            if self.kill_switch:
+                self.kill_switch.activate(
+                    reason=f"Uncertain order submission: {operation_name} ({client_order_id})",
+                    triggered_by="system",
+                )
+            raise OrderSubmissionUncertain(
+                f"{operation_name} outcome is unknown (client_order_id={client_order_id}); "
+                "no retry was sent. Reconcile broker orders before deactivating the kill switch."
+            ) from submit_error
 
     def _connect_to_alpaca(self):
         """Authenticates with Alpaca.
@@ -706,6 +749,22 @@ class AlpacaBroker:
         # Build mandate context from current account state
         account = self.get_account_summary()
         open_positions = self.get_open_positions()
+        reconciliation = self.positions_reconciliation()
+        if not reconciliation.get("ok", False):
+            reason = reconciliation.get("error") or "broker positions unavailable"
+            if self.audit_ledger:
+                self.audit_ledger.log_order_rejected(
+                    symbol=symbol, side="buy", notional_usd=notional_usd, qty=qty,
+                    reason=f"Unreconciled broker positions: {reason}",
+                    violations=[{"type": "positions_unreconciled", "message": str(reason)}],
+                    context={"entry_price": entry_price},
+                )
+            return OrderResult(
+                success=False, order_id="", symbol=symbol, qty=qty,
+                entry_price=entry_price, stop_loss=stop_loss_price,
+                take_profit=take_profit_price,
+                message=f"Order blocked: broker positions could not be reconciled: {reason}",
+            )
 
         mandate_context = MandateContext(
             symbol=symbol,
@@ -821,14 +880,10 @@ class AlpacaBroker:
                     time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)),
-                    stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2))
+                    stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2)),
+                    client_order_id=f"bot-{uuid.uuid4().hex}",
                 )
-                order = retry_api_call(
-                    lambda: self.client.submit_order(req),
-                    max_retries=2,
-                    base_delay=1.0,
-                    operation_name=f"submit_order({symbol})"
-                )
+                order = self._submit_order_once(req, f"submit_order({symbol})")
                 # Verify the protective legs actually exist. A bracket
                 # order can be accepted and still come back without legs,
                 # which leaves the position with no stop and no target
@@ -837,6 +892,15 @@ class AlpacaBroker:
                 time.sleep(1.0)
                 has_stop = False
                 has_limit = False
+                if hasattr(order, "status") and str(order.status).lower().split(".")[-1] in {
+                    "rejected", "canceled", "cancelled", "expired"
+                }:
+                    return OrderResult(
+                        success=False, order_id=str(order.id), symbol=symbol, qty=qty,
+                        entry_price=entry_price, stop_loss=stop_loss_price,
+                        take_profit=take_profit_price,
+                        message=f"Broker confirmed order was not accepted: {order.status}",
+                    )
                 for existing in self._get_symbol_orders(symbol):
                     order_type = str(getattr(existing, "type", "") or "").lower()
                     if "stop" in order_type:
@@ -1066,13 +1130,9 @@ class AlpacaBroker:
                     qty=qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
+                    client_order_id=f"bot-{uuid.uuid4().hex}",
                 )
-                order = retry_api_call(
-                    lambda: self.client.submit_order(req),
-                    max_retries=2,
-                    base_delay=1.0,
-                    operation_name=f"close_position({symbol})"
-                )
+                order = self._submit_order_once(req, f"close_position({symbol})")
 
                 # Log close order
                 position = self.get_open_positions().get(symbol, {})
@@ -1274,8 +1334,9 @@ class AlpacaBroker:
                     type="stop",
                     time_in_force=TimeInForce.GTC,
                     stop_price=round(new_stop, 2),
+                    client_order_id=f"bot-{uuid.uuid4().hex}",
                 )
-                order = self.client.submit_order(req)
+                order = self._submit_order_once(req, f"restore_trailing_stop({symbol})")
                 logger.info(
                     f"Restored missing trailing stop for {symbol} at ${new_stop:.2f} "
                     f"(order {order.id})"
@@ -1376,8 +1437,9 @@ class AlpacaBroker:
                         order_class=OrderClass.OCO,
                         take_profit=TakeProfitRequest(limit_price=limit_price),
                         stop_loss=StopLossRequest(stop_price=stop_price),
+                        client_order_id=f"bot-{uuid.uuid4().hex}",
                     )
-                    self.client.submit_order(req)
+                    self._submit_order_once(req, f"restore_protection({symbol})")
                     missing = []
                     if not has_stop:
                         missing.append(f"stop-loss at ${stop_price:,.2f}")

@@ -713,13 +713,38 @@ def _find_bot_processes() -> List[Dict[str, Any]]:
 
 
 def _profile_from_command(command: str) -> Optional[str]:
+    """Identify a bot worker command line without counting Windows venv shims.
+
+    Windows virtualenvs use a launcher stub (`venv\\Scripts\\python.exe`) that
+    spawns the base interpreter (`C:\\Python...\\python.exe`) with the same
+    arguments and waits on it. `_scan_bot_processes` collapses that parent/child
+    wrapper pair so a single worker is not reported as a duplicate.
+    """
     command = command.lower()
     if "pytest" in command or "dashboard_server" in command:
         return None
     worker = re.search(r"--worker-profile(?:=|\s+)(primary|secondary)\b", command)
     if worker:
         return worker.group(1).lower()
-    return "primary" if "bot.py" in command else None
+    if "run_accounts.py" in command:
+        return None
+    return "primary" if re.search(r"(?:^|[\\/\s\"])(?:bot\.py)(?:[\s\"]|$)", command) else None
+
+
+def _collapse_windows_venv_wrappers(processes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse a Windows venv shim parent when its child runs the same profile."""
+    by_pid = {item["pid"]: item for item in processes if item.get("pid")}
+    wrapper_pids = {
+        item.get("ppid")
+        for item in processes
+        if item.get("ppid") in by_pid
+        and by_pid[item["ppid"]].get("profile") == item.get("profile")
+    }
+    return [
+        {"pid": item["pid"], "profile": item["profile"]}
+        for item in processes
+        if item.get("pid") not in wrapper_pids
+    ]
 
 
 def _scan_bot_processes() -> List[Dict[str, Any]]:
@@ -729,7 +754,7 @@ def _scan_bot_processes() -> List[Dict[str, Any]]:
         if os.name == "nt":
             ps = (
                 "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" "
-                "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+                "| Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress"
             )
             res = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
@@ -740,12 +765,15 @@ def _scan_bot_processes() -> List[Dict[str, Any]]:
             data = json.loads(res.stdout)
             if isinstance(data, dict):
                 data = [data]
+            raw: List[Dict[str, Any]] = []
             for item in data:
                 cmd = item.get("CommandLine") or ""
                 pid = item.get("ProcessId")
+                ppid = item.get("ParentProcessId")
                 profile = _profile_from_command(cmd)
                 if pid and pid != os.getpid() and profile:
-                    found.append({"pid": pid, "profile": profile})
+                    raw.append({"pid": pid, "ppid": ppid, "profile": profile})
+            found.extend(_collapse_windows_venv_wrappers(raw))
         else:
             proc_root = Path("/proc")
             for entry in proc_root.iterdir():
@@ -1034,7 +1062,7 @@ def fetch_overview() -> Dict[str, Any]:
         "orchestrator": orchestrator_status(),
     }
     for key, fn in (("account", get_account), ("positions", get_positions),
-                    ("attention", get_attention)):
+                    ("attention", get_attention), ("liveness", get_liveness)):
         try:
             payload[key] = fn()
         except Exception as e:

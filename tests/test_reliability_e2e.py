@@ -16,7 +16,11 @@ import types
 
 import pytest
 
-from execution.alpaca_broker import AlpacaBroker, retry_api_call
+from execution.alpaca_broker import (
+    AlpacaBroker,
+    OrderSubmissionUncertain,
+    retry_api_call,
+)
 
 
 # --- Fatal auth is not retried ---------------------------------------------
@@ -32,6 +36,62 @@ def test_retry_api_call_does_not_retry_fatal_auth():
     with pytest.raises(ValueError, match="Unauthorized"):
         retry_api_call(unauthorized, max_retries=3, base_delay=0.01)
     assert calls == 1  # never retried: fatal
+
+
+def test_order_submission_reconciles_ambiguous_response_without_resubmitting():
+    broker = AlpacaBroker(force_simulator=True)
+
+    class Client:
+        submitted = 0
+
+        def submit_order(self, request):
+            self.submitted += 1
+            raise TimeoutError("response timed out")
+
+        def get_order_by_client_id(self, client_order_id):
+            assert client_order_id == "bot-test-id"
+            return types.SimpleNamespace(id="accepted-order")
+
+    client = Client()
+    broker.client = client
+    request = types.SimpleNamespace(client_order_id="bot-test-id")
+
+    order = broker._submit_order_once(request, "test order")
+
+    assert order.id == "accepted-order"
+    assert client.submitted == 1
+
+
+def test_uncertain_order_submission_latches_kill_switch_without_retry():
+    broker = AlpacaBroker(force_simulator=True)
+
+    class Client:
+        submitted = 0
+
+        def submit_order(self, request):
+            self.submitted += 1
+            raise TimeoutError("response timed out")
+
+        def get_order_by_client_id(self, client_order_id):
+            raise ConnectionError("broker still unavailable")
+
+    class Switch:
+        def __init__(self):
+            self.reasons = []
+
+        def activate(self, reason, triggered_by):
+            self.reasons.append((reason, triggered_by))
+
+    client = Client()
+    broker.client = client
+    broker.kill_switch = Switch()
+    request = types.SimpleNamespace(client_order_id="bot-test-id")
+
+    with pytest.raises(OrderSubmissionUncertain, match="no retry was sent"):
+        broker._submit_order_once(request, "test order")
+
+    assert client.submitted == 1
+    assert broker.kill_switch.reasons
 
 
 def test_retry_api_call_does_not_retry_forbidden():
@@ -105,6 +165,23 @@ def test_outage_degrades_to_empty_positions():
     """
     broker = _make_live_broker(_FakeClient([], fail_positions=True))
     assert broker.get_open_positions() == {}
+
+
+def test_unreconciled_positions_block_new_bracket_order():
+    broker = _make_live_broker(_FakeClient([], fail_positions=True))
+    broker.audit_ledger = None
+    broker.mandate_gate = None
+    broker.paper_live_boundary = None
+    broker.kill_switch = None
+    broker.get_account_summary = lambda: {
+        "equity": 100000.0, "cash": 100000.0,
+        "buying_power": 200000.0, "mode": "ALPACA_PAPER",
+    }
+
+    result = broker.place_bracket_buy_order("SPY", 1, 500.0, 490.0, 520.0)
+
+    assert not result.success
+    assert "positions could not be reconciled" in result.message
 
 
 def test_reconciliation_ignores_positions_without_protective_orders():

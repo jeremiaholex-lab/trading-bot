@@ -5,10 +5,13 @@ import json
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Mapping
+from urllib.request import urlopen
 
 from dotenv import dotenv_values
 
@@ -112,42 +115,150 @@ def _heartbeat_path(profile: str, base_dir: Path) -> Path:
     return root / "bot_heartbeat.json"
 
 
+def _pid_is_running(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # access denied means it exists
+            try:
+                exit_code = wintypes.DWORD()
+                return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value == 259
+            finally:
+                kernel32.CloseHandle(handle)
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, SystemError):
+        return False
+
+
 def _worker_is_running(profile: str, base_dir: Path) -> bool:
     try:
         heartbeat = json.loads(_heartbeat_path(profile, base_dir).read_text(encoding="utf-8"))
+        if heartbeat.get("profile", profile) != profile:
+            return False
         pid = int(heartbeat["pid"])
+        updated = datetime.fromisoformat(heartbeat["updated_at"])
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
+        return age <= 600 and _pid_is_running(pid)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return False
+
+
+def _dashboard_is_running(port: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+            return response.status == 200
+    except Exception:
         return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
-def _stop_owned_processes(processes: list[subprocess.Popen]) -> None:
-    for process in processes:
-        if process.poll() is None:
-            process.terminate()
+def _owned_dashboard_pids(profiles: list[str]) -> list[int]:
+    if os.name != "nt":
+        return []
+    ports = [str(DASHBOARD_PORTS[p]) for p in profiles]
+    try:
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" "
+            "| Where-Object { $_.CommandLine -match 'dashboard_server\\.py' -and "
+            + " -or ".join(f"$_.CommandLine -match '--port {port}(?:\\s|$)'" for port in ports)
+            + " } | Select-Object -ExpandProperty ProcessId | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=8,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        data = json.loads(result.stdout)
+        return [int(data)] if isinstance(data, int) else [int(pid) for pid in data]
+    except Exception:
+        return []
+
+
+def _stop_owned_processes(processes: list[subprocess.Popen], profiles: list[str], base_dir: Path) -> None:
+    pids = {process.pid for process in processes if process.poll() is None}
+    for profile in profiles:
+        try:
+            heartbeat = json.loads(_heartbeat_path(profile, base_dir).read_text(encoding="utf-8"))
+            if heartbeat.get("profile") == profile and heartbeat.get("pid"):
+                pids.add(int(heartbeat["pid"]))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            pass
+    pids.update(_owned_dashboard_pids(profiles))
+
+    # First ask the Popen-owned process to stop normally, then ensure the
+    # Windows venv interpreter child it spawned is also terminated.
     for process in processes:
         if process.poll() is None:
             try:
-                process.wait(timeout=10)
+                process.terminate()
+            except OSError:
+                pass
+    deadline = time.monotonic() + 5
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+    for pid in pids:
+        if not _pid_is_running(pid):
+            continue
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=8)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _wait_for_owned_services(profiles: list[str], base_dir: Path, timeout: float = 45.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        missing = []
+        for profile in profiles:
+            if not _worker_is_running(profile, base_dir):
+                missing.append(f"{profile} worker heartbeat")
+            if not _dashboard_is_running(DASHBOARD_PORTS[profile]):
+                missing.append(f"{profile} dashboard :{DASHBOARD_PORTS[profile]}")
+        if not missing:
+            return
+        time.sleep(1)
+    raise RuntimeError("Startup timed out waiting for: " + ", ".join(missing))
 
 
 def start_accounts(base_dir: Path = BASE_DIR) -> None:
     launcher_lock = _acquire_launcher_lock(base_dir)
     processes: list[subprocess.Popen] = []
+    profiles: list[str] = []
     try:
         profiles = configured_profiles(base_dir)
         running = [profile for profile in profiles if _worker_is_running(profile, base_dir)]
+        dashboards = [profile for profile in profiles if _dashboard_is_running(DASHBOARD_PORTS[profile])]
+        if dashboards:
+            raise RuntimeError(
+                "Dashboard port(s) already in use: "
+                + ", ".join(f"{profile} :{DASHBOARD_PORTS[profile]}" for profile in dashboards)
+            )
         if running:
             raise RuntimeError("Already-running bot worker(s): " + ", ".join(running))
 
@@ -169,16 +280,19 @@ def start_accounts(base_dir: Path = BASE_DIR) -> None:
             ))
             print(f"Started {profile} paper worker and read-only dashboard on port {DASHBOARD_PORTS[profile]}.")
 
-        while all(process.poll() is None for process in processes):
-            time.sleep(1)
-        exited = [str(process.pid) for process in processes if process.poll() is not None]
-        if exited:
-            raise RuntimeError("Owned account process exited unexpectedly: " + ", ".join(exited))
+        # The Windows venv python.exe is a launcher stub: it spawns the base
+        # interpreter and exits. Popen.poll() therefore does not represent the
+        # actual worker/server lifetime. Supervise the worker heartbeats and
+        # dashboard HTTP endpoints, which correspond to the real child processes.
+        _wait_for_owned_services(profiles, base_dir)
+        while True:
+            time.sleep(5)
+            _wait_for_owned_services(profiles, base_dir, timeout=30.0)
     except KeyboardInterrupt:
         print("Stopping account processes started by this launcher.")
     finally:
         try:
-            _stop_owned_processes(processes)
+            _stop_owned_processes(processes, profiles, base_dir)
         finally:
             _release_launcher_lock(launcher_lock)
 

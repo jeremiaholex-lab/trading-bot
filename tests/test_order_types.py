@@ -53,6 +53,9 @@ def test_simple_order_executor_alpaca_mock():
     mock_order = MagicMock()
     mock_order.id = "alpaca-123"
     mock_broker.client.submit_order.return_value = mock_order
+    mock_broker._submit_order_once.side_effect = (
+        lambda request, operation: mock_broker.client.submit_order(request)
+    )
 
     executor = SimpleOrderExecutor(mock_broker)
     res = executor.place_limit_buy("AAPL", 10, 150.0, 140.0, 170.0)

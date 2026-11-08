@@ -151,6 +151,22 @@ def _make_orchestrator(monkeypatch, broker, signals, frames=None, watchlist=None
 # positions taken BEFORE the scan loop, so every symbol in the loop saw
 # the same count and the cap could be exceeded within a single scan.
 # ----------------------------------------------------------------------
+def test_unreconciled_broker_positions_skip_the_scan(monkeypatch):
+    broker = FakeBroker()
+    broker.positions_reconciliation = lambda: {
+        "ok": False, "error": "temporary broker outage", "source": "live"
+    }
+    watchlist = ["AAPL"]
+    orch = _make_orchestrator(
+        monkeypatch, broker, {"AAPL": _signal("BUY", "AAPL")}, watchlist=watchlist
+    )
+
+    signals = orch.scan_and_trade()
+
+    assert signals == []
+    assert broker.buy_orders == []
+
+
 def test_position_cap_is_enforced_within_a_single_scan(monkeypatch):
     """A scan must not open more positions than MAX_OPEN_POSITIONS."""
     from config import Config

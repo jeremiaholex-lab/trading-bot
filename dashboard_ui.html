@@ -609,23 +609,49 @@
   /* ---------- risk-first operator desk ---------- */
   html{scroll-behavior:smooth;scroll-padding-top:96px}
   .shell{max-width:1720px}
-  .topbar{padding:10px 16px;margin-bottom:12px;border-radius:12px;background:rgba(13,20,21,.92);border-color:var(--line)}
+  .topbar{background:rgba(10,16,16,.96);box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 12px 28px -24px rgba(0,0,0,.9)}
+  .dashboard-shell{grid-template-columns:168px minmax(0,1fr);gap:20px}
+  .topbar{padding:10px 16px;margin-bottom:14px;border-radius:12px;background:rgba(13,20,21,.92);border-color:var(--line)}
   .logo{background:rgba(119,201,170,.09);border-color:rgba(119,201,170,.24);box-shadow:none}
-  .dashboard-shell{display:grid;grid-template-columns:156px minmax(0,1fr);gap:16px;align-items:start}
-  .rail{position:sticky;top:77px;display:flex;flex-direction:column;gap:4px;padding:9px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+  .dashboard-shell{display:grid;grid-template-columns:168px minmax(0,1fr);gap:20px;align-items:start}
+  .nav-toggle{display:none;flex:0 0 34px;width:34px;height:34px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface);cursor:pointer}
+  .nav-toggle span{display:block;height:1.5px;margin:3px 0;border-radius:2px;background:var(--text)}
+  .rail-backdrop{display:none}
+  .profile-box{gap:8px;padding:4px 5px 4px 10px;border:1px solid var(--line);border-radius:9px;background:rgba(255,255,255,.025)}
+  .profile-box label{font-family:var(--mono);font-size:8px;letter-spacing:.1em}
+  .profile-box select,.theme-box select{height:30px;padding:0 27px 0 10px;border-radius:7px;background-color:var(--surface-2);border-color:var(--line);font-size:10px;cursor:pointer}
+  .profile-box select{min-width:112px;color:var(--accent);font-weight:700}
+  .profile-box select option,.theme-box select option{background:var(--surface);color:var(--text)}
+  #appHeader[data-profile="secondary"] .logo{background:var(--blue-dim);border-color:var(--blue-glow)}
+  #appHeader[data-profile="secondary"] .logo svg path{stroke:var(--blue)}
+  #appHeader[data-profile="secondary"] .profile-box select{color:var(--blue)}
+  .rail{position:sticky;top:77px;display:flex;flex-direction:column;gap:5px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
   .rail-label{padding:6px 9px 9px;color:var(--faint);font-size:10px;font-weight:650;letter-spacing:.02em}
-  .rail a{display:flex;align-items:center;gap:9px;padding:9px;border:1px solid transparent;border-radius:7px;color:var(--muted);font-size:11px;font-weight:550;text-decoration:none;transition:color .16s,border-color .16s,background .16s}
+  .rail a{display:flex;align-items:center;gap:10px;padding:10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font-size:11px;font-weight:550;text-decoration:none;transition:color .16s,border-color .16s,background .16s}
   .rail a:hover,.rail a:focus-visible{color:var(--text);background:var(--surface-2);border-color:var(--line)}
   .rail a[aria-current="page"]{color:var(--accent);background:var(--green-dim);border-color:rgba(119,201,170,.2)}
   .rail-mark{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.75}
   .rail-foot{margin-top:12px;padding:10px 9px 3px;border-top:1px solid var(--line-soft);color:var(--faint);font-size:9px;line-height:1.55}
   .dashboard-main{min-width:0}.dashboard-section{scroll-margin-top:92px;margin-bottom:20px}
-  .sect{margin:15px 2px 8px;color:var(--text);font-family:var(--ui);font-size:13px;font-weight:650;letter-spacing:-.01em;text-transform:none}
+  .workspace-banner{--profile-accent:var(--accent);--profile-tint:var(--accent-glow-subtle);--profile-edge:var(--line);position:relative;display:flex;justify-content:space-between;align-items:center;gap:24px;margin:0 0 18px;padding:20px 22px;border:1px solid var(--profile-edge);border-left:3px solid var(--profile-accent);border-radius:14px;background:linear-gradient(105deg,var(--profile-tint),transparent 56%),var(--surface);box-shadow:0 1px 0 rgba(255,255,255,.035) inset}
+  .workspace-banner[data-profile="secondary"]{--profile-accent:var(--blue);--profile-tint:var(--blue-dim);--profile-edge:var(--blue-glow)}
+  .workspace-identity{min-width:0}.workspace-eyebrow{display:block;color:var(--profile-accent);font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.14em}
+  .workspace-identity h2{margin:6px 0 2px;color:var(--text);font-family:var(--display);font-size:clamp(20px,2.1vw,28px);font-weight:650;letter-spacing:-.045em;line-height:1.2}
+  .workspace-identity{flex:1}
+  .workspace-identity p{margin:0;color:var(--muted);font-size:11px}
+  .workspace-facts{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;max-width:58%}
+  .workspace-fact{display:grid;gap:5px;min-width:118px;padding:9px 12px;border:1px solid var(--line-soft);border-radius:9px;background:rgba(0,0,0,.12)}
+  #portfolioSection + .card > .card{margin-top:8px!important;padding:14px 0 0;border:0;border-top:1px solid var(--line-soft);border-radius:0;background:transparent;box-shadow:none}
+  #portfolioSection + .card > .card:hover{border-color:var(--line-soft);box-shadow:none}
+  .workspace-fact span{color:var(--faint);font-family:var(--mono);font-size:8px;font-weight:600;letter-spacing:.1em}
+  .workspace-fact b{color:var(--text);font-size:10px;font-weight:650;overflow-wrap:anywhere}.workspace-fact b.state-ok{color:var(--accent)}.workspace-fact b.state-warn{color:var(--amber)}.workspace-fact b.state-bad{color:var(--red)}.workspace-fact b.state-pending{color:var(--muted)}
+  .workspace-banner[data-profile="secondary"] .workspace-eyebrow,.workspace-banner[data-profile="secondary"] .workspace-fact b.state-ok{color:var(--blue)}
+  .sect{margin:20px 2px 10px;color:var(--text);font-family:var(--ui);font-size:13px;font-weight:650;letter-spacing:-.01em;text-transform:none}
   .sect::after{background:var(--line-soft)}.sect b{display:none}
-  .card{border-color:var(--line);border-radius:11px;background:linear-gradient(180deg,rgba(255,255,255,.018),transparent 55%),var(--surface);box-shadow:0 1px 0 rgba(255,255,255,.025) inset;animation:none}
+  .card{border-color:var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.018),transparent 55%),var(--surface);box-shadow:0 1px 0 rgba(255,255,255,.025) inset;animation:none}
   .card:hover{border-color:var(--line);box-shadow:0 1px 0 rgba(255,255,255,.025) inset}
   .card h2{color:var(--text);font-size:12px;letter-spacing:-.01em;text-transform:none}.card .hint{font-size:10px}
-  .kpi{min-height:92px}.kpi .label{text-transform:none;letter-spacing:.01em}.kpi.feat{border-color:rgba(119,201,170,.26);box-shadow:0 1px 0 rgba(119,201,170,.08) inset}.kpi.feat .value{color:var(--accent)}.kpi.feat::after{background:linear-gradient(90deg,var(--accent),transparent)}
+  .kpi{min-height:106px}.kpi .label{text-transform:none;letter-spacing:.01em}.kpi.feat{border-color:rgba(119,201,170,.26);box-shadow:0 1px 0 rgba(119,201,170,.08) inset}.kpi.feat .value{color:var(--accent)}.kpi.feat::after{background:linear-gradient(90deg,var(--accent),transparent)}
   .risk-panel{display:flex;flex-direction:column;gap:0}
   .risk-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-soft)}.risk-row:last-child{border-bottom:0}
   .risk-name{font-size:10.5px;font-weight:550;color:var(--text)}.risk-detail{grid-column:1;color:var(--muted);font-size:9.5px;line-height:1.4}
@@ -637,10 +663,23 @@
   .recent-event.warning .event-level{color:var(--amber)}.recent-event.error .event-level,.recent-event.critical .event-level{color:var(--red)}.recent-event .event-message{color:var(--muted);overflow-wrap:anywhere}
   .nav-target{scroll-margin-top:92px}.tbl-scroll{border-color:var(--line-soft);background:rgba(0,0,0,.12)}th{background:var(--surface);border-color:var(--line-soft);color:var(--muted)}td{border-color:var(--line-soft)}tbody tr:hover{background:var(--accent-glow-subtle)}
   .pill{height:25px}.btn,select{height:28px}.foot{border-color:var(--line-soft);text-transform:none;letter-spacing:.01em}
-  @media(max-width:1120px){.dashboard-shell{grid-template-columns:132px minmax(0,1fr);gap:11px}.rail a{padding:8px 7px;font-size:10px}}
-  @media(max-width:900px){.dashboard-shell{grid-template-columns:minmax(0,1fr)}.rail{position:sticky;top:64px;z-index:30;flex-direction:row;align-items:center;gap:3px;overflow-x:auto;padding:5px}.rail-label,.rail-foot{display:none}.rail a{flex:0 0 auto;padding:8px 9px}}
-  @media(max-width:760px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-section{margin-bottom:15px}.rail a{font-size:9.5px}.risk-row{padding:8px 0}.recent-event{grid-template-columns:44px 46px minmax(0,1fr);gap:6px;font-size:8.5px}}
-  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  @media(max-width:1120px){.dashboard-shell{grid-template-columns:132px minmax(0,1fr);gap:11px}.rail a{padding:8px 7px;font-size:10px}.workspace-banner{align-items:flex-start;flex-direction:column;gap:14px}.workspace-facts{width:100%;max-width:none;justify-content:flex-start}.workspace-fact{flex:1}}
+  @media(max-width:900px){.topbar{position:relative}.head-right{justify-content:flex-start}.workspace-banner{margin-bottom:14px}}
+  @media(max-width:900px){
+    .dashboard-shell{grid-template-columns:minmax(0,1fr)}
+    .nav-toggle{display:block}
+    .rail{position:fixed;z-index:81;inset:0 auto 0 0;width:min(280px,82vw);height:100dvh;overflow-y:auto;display:flex;flex-direction:column;align-items:stretch;gap:5px;padding:18px 12px calc(18px + env(safe-area-inset-bottom));border-radius:0 14px 14px 0;border-left:0;background:var(--surface);box-shadow:16px 0 40px rgba(0,0,0,.38);transform:translateX(-105%);visibility:hidden;transition:transform .22s var(--spring),visibility .22s;}
+    .rail.is-open{transform:translateX(0);visibility:visible}
+    .rail:focus{outline:none}
+    .rail-label,.rail-foot{display:block}
+    .rail a{flex:0 0 auto;padding:11px 10px;font-size:11px}
+    .rail-backdrop{position:fixed;z-index:80;inset:0;display:block;padding:0;border:0;background:rgba(0,0,0,.48);opacity:0;visibility:hidden;transition:opacity .2s,visibility .2s}
+    .rail-backdrop.is-open{opacity:1;visibility:visible}
+    body.nav-open{overflow:hidden}
+    .workspace-banner{margin-bottom:14px}
+  }
+  @media(max-width:760px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-section{margin-bottom:15px}.rail a{font-size:9.5px}.risk-row{padding:8px 0}.recent-event{grid-template-columns:44px 46px minmax(0,1fr);gap:6px;font-size:8.5px}.workspace-banner{padding:16px}.workspace-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.workspace-fact{min-width:0;padding:8px}.workspace-fact span{font-size:7px}.workspace-fact b{font-size:9px}}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.rail,.rail-backdrop{transition:none}}
 
 </style>
 
@@ -648,13 +687,25 @@
 <body>
 <div class="atmo" aria-hidden="true"></div>
 <div class="shell">
-  <header class="topbar">
-    <div class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M3 17.2l5.1-6.4 3.9 3.5L21 4.6" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M15.6 4.6H21v5.2" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div class="brand-txt"><h1>Autonomous Trading</h1><div class="sub" id="hdrSub">connecting…</div></div></div>
-    <div class="head-right"><span class="pill idle" id="pillLive"><span class="dot"></span><span>CONNECTING</span></span><span class="pill blue" id="pillMode">MODE —</span><span class="pill idle" id="pillMarket">MARKET —</span><span class="pill idle" id="pillScan">SCAN —</span><div class="profile-box"><label for="profileSelect">Account</label><select id="profileSelect" aria-label="Select paper account"><option value="primary">Primary</option><option value="secondary">Secondary</option></select></div><div class="theme-box" title="Switch theme"><select id="themeSelect" aria-label="Switch theme"><option value="graphite">Graphite</option><option value="cyberpunk">Cyberpunk neon</option><option value="oled">OLED black</option><option value="navy">Midnight navy</option><option value="matrix">Emerald matrix</option></select></div></div>
+  <header class="topbar" id="appHeader" data-profile="primary">
+    <div class="brand"><button class="nav-toggle" id="navToggle" type="button" aria-label="Open dashboard navigation" aria-controls="dashboardNav" aria-expanded="false"><span></span><span></span><span></span></button><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M3 17.2l5.1-6.4 3.9 3.5L21 4.6" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M15.6 4.6H21v5.2" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div class="brand-txt"><h1>Autonomous Trading</h1><div class="sub" id="hdrSub">connecting…</div></div></div>
+    <div class="head-right"><span class="pill idle" id="pillLive"><span class="dot"></span><span>CONNECTING</span></span><span class="pill blue" id="pillMode">MODE —</span><span class="pill idle" id="pillMarket">MARKET —</span><span class="pill idle" id="pillScan">SCAN —</span><div class="profile-box"><label for="profileSelect">PROFILE</label><select id="profileSelect" aria-label="Select paper account"><option value="primary">Primary</option><option value="secondary">Secondary</option></select></div><div class="theme-box" title="Switch theme"><select id="themeSelect" aria-label="Switch theme"><option value="graphite">Graphite</option><option value="cyberpunk">Cyberpunk neon</option><option value="oled">OLED black</option><option value="navy">Midnight navy</option><option value="matrix">Emerald matrix</option></select></div></div>
   </header>
   <div class="dashboard-shell">
-    <nav class="rail" aria-label="Dashboard sections"><div class="rail-label">Trading system</div><a href="#overview" aria-current="page"><i class="rail-mark"></i>Overview</a><a href="#positionsSection"><i class="rail-mark"></i>Positions</a><a href="#activitySection"><i class="rail-mark"></i>Activity</a><a href="#scanSection"><i class="rail-mark"></i>Market scan</a><a href="#diagnosticsSection"><i class="rail-mark"></i>Diagnostics</a><div class="rail-foot">Read-only view<br>Orders cannot be placed here</div></nav>
+    <nav class="rail" id="dashboardNav" aria-label="Dashboard sections"><div class="rail-label">Trading system</div><a href="#overview" aria-current="page"><i class="rail-mark"></i>Overview</a><a href="#positionsSection"><i class="rail-mark"></i>Positions</a><a href="#activitySection"><i class="rail-mark"></i>Activity</a><a href="#scanSection"><i class="rail-mark"></i>Market scan</a><a href="#diagnosticsSection"><i class="rail-mark"></i>Diagnostics</a><div class="rail-foot">Read-only view<br>Orders cannot be placed here</div></nav><button class="rail-backdrop" id="railBackdrop" type="button" aria-label="Close dashboard navigation" tabindex="-1"></button>
     <main class="dashboard-main">
+      <section class="workspace-banner" id="workspaceBanner" aria-label="Selected account workspace" data-profile="primary">
+        <div class="workspace-identity">
+          <span class="workspace-eyebrow">ACCOUNT WORKSPACE</span>
+          <h2 id="workspaceName">Primary account</h2>
+          <p id="workspaceCopy">Dedicated portfolio view · read-only controls</p>
+        </div>
+        <div class="workspace-facts" aria-live="polite">
+          <div class="workspace-fact"><span>ACCOUNT MODE</span><b id="workspaceMode">Connecting…</b></div>
+          <div class="workspace-fact"><span>BOT STATUS</span><b id="workspaceRuntime" class="state-pending">Connecting</b></div>
+          <div class="workspace-fact"><span>MARKET</span><b id="workspaceMarket">—</b></div>
+        </div>
+      </section>
       <section id="overview" class="dashboard-section">
         <div class="sect">Account and system health</div><div id="alerts"></div>
         <div class="grid kpis" id="kpis">
@@ -822,11 +873,18 @@ let lastSlow = Date.now();
 function apiUrl(path) {
   const profile = profileRegistry[S.activeProfile];
   if (!profile || !profile.available) throw new Error("Selected account profile is unavailable");
-  return new URL(path, profile.origin).toString();
+  const isCurrentPort = (location.port === "8765" && S.activeProfile === "primary") ||
+                        (location.port === "8766" && S.activeProfile === "secondary");
+  const base = isCurrentPort ? location.origin : profile.origin;
+  return new URL(path, base).toString();
 }
 
 function websocketUrl() {
-  const url = new URL("/ws", profileRegistry[S.activeProfile].origin);
+  const profile = profileRegistry[S.activeProfile];
+  const isCurrentPort = (location.port === "8765" && S.activeProfile === "primary") ||
+                        (location.port === "8766" && S.activeProfile === "secondary");
+  const base = isCurrentPort ? location.origin : ((profile && profile.origin) ? profile.origin : location.origin);
+  const url = new URL("/ws", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
@@ -880,6 +938,10 @@ function switchProfile(profile, persist = true) {
   clearProfileState();
   if (!profileRegistry[profile].available) { showProfileUnavailable(); return; }
   connectWS();
+  const currentGen = S.profileGeneration;
+  getJSON("/api/overview", currentGen).then(d => {
+    if (d && currentGen === S.profileGeneration) applyOverview(d);
+  }).catch(() => {});
   pollTrades();
   pollScan();
   pollLogs();
@@ -913,7 +975,8 @@ async function loadProfileRegistry() {
   let saved = "primary";
   try {
     const stored = localStorage.getItem("dashboard-account-profile");
-    if (stored === "primary" || stored === "secondary") saved = stored;
+    if (stored === "secondary" && profileRegistry.secondary.available) saved = "secondary";
+    else if (stored === "primary") saved = "primary";
   } catch (_) {}
   select.value = saved;
   switchProfile(saved, false);
@@ -925,6 +988,15 @@ function renderHeader() {
   const acc  = S.accountError ? {} : (S.account || {});
 
   // liveness pill
+  const profileName = S.activeProfile === "secondary" ? "Secondary" : "Primary";
+  const workspace = $("workspaceBanner");
+  if (workspace) workspace.dataset.profile = S.activeProfile;
+  $("workspaceName").textContent = `${profileName} account`;
+  $("workspaceCopy").textContent = `${profileName} profile · isolated portfolio view · read-only controls`;
+  $("appHeader").dataset.profile = S.activeProfile;
+  $("workspaceMode").textContent = S.accountError ? "Unavailable" : (acc.mode || "Connecting…");
+  $("workspaceMode").className = S.accountError ? "state-bad" : (acc.mode ? "state-ok" : "state-pending");
+
   const p = $("pillLive");
   const verdict = live.verdict || "UNKNOWN";
   const map = {
@@ -937,6 +1009,11 @@ function renderHeader() {
   const [k, label] = map[verdict] || ["idle", verdict];
   p.className = "pill " + k;
   p.innerHTML = `<span class="dot"></span>${esc(label)} · ${live.heartbeat_age_sec ?? "—"}s`;
+  $("workspaceRuntime").textContent = S.accountError ? "Unavailable" : label;
+  $("workspaceRuntime").className = S.accountError || k === "bad" ? "state-bad" : k === "ok" ? "state-ok" : "state-warn";
+  const marketLabel = (live.market_state || "—").toString();
+  $("workspaceMarket").textContent = marketLabel;
+  $("workspaceMarket").className = marketLabel.toUpperCase() === "OPEN" ? "state-ok" : marketLabel === "—" ? "state-pending" : "state-warn";
 
   $("pillMode").textContent = acc.mode || "MODE —";
   $("pillMode").className = "pill " + (acc.simulated ? "blue" : "ok");
@@ -1742,6 +1819,7 @@ function applyOverview(d) {
     S.positionsError = d.positions && d.positions.error ? d.positions.error : "Position data unavailable";
   }
   if (d.orchestrator) S.orchestrator = d.orchestrator;
+  if (d.liveness && !d.liveness.error) S.liveness = d.liveness;
   if (d.attention) S.attention = d.attention;
   if (d.orchestrator) {
     if (!d.orchestrator.ready) {
@@ -1763,7 +1841,8 @@ function applySlow(d) {
 }
 
 /* ---------- WebSocket with polling fallback ---------- */
-let ws = null, wsRetry = 0, pollTimer = null;
+let ws = null, wsRetry = 0, pollTimer = null, wsConnectTimer = null;
+let lastFallbackSlowPoll = 0;
 
 function connectWS() {
   if (!profileRegistry[S.activeProfile]?.available) return;
@@ -1772,9 +1851,14 @@ function connectWS() {
   try { socket = new WebSocket(websocketUrl()); }
   catch (_) { startPolling(); return; }
   ws = socket;
+  // A blocked or stalled loopback WebSocket must not leave account cards blank.
+  wsConnectTimer = setTimeout(() => {
+    if (generation === S.profileGeneration && socket.readyState === WebSocket.CONNECTING) socket.close();
+  }, 5000);
 
   socket.onopen = () => {
     if (generation !== S.profileGeneration) return;
+    if (wsConnectTimer) { clearTimeout(wsConnectTimer); wsConnectTimer = null; }
     S.wsOk = true; wsRetry = 0;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   };
@@ -1786,6 +1870,7 @@ function connectWS() {
   };
   socket.onclose = () => {
     if (generation !== S.profileGeneration) return;
+    if (wsConnectTimer) { clearTimeout(wsConnectTimer); wsConnectTimer = null; }
     S.wsOk = false;
     const pill = $("pillLive");
     if (!pollTimer) {
@@ -1816,6 +1901,43 @@ function buildPortfolioHistoryUrl() {
   params.set("period", S.historyPeriod);
   params.set("timeframe", S.historyResolution === "Auto" ? resolveAutoTimeframe() : S.historyResolution);
   return `${base}?${params.toString()}`;
+}
+
+function startPolling() {
+  if (pollTimer || !profileRegistry[S.activeProfile]?.available) return;
+  const generation = S.profileGeneration;
+  const refresh = async () => {
+    if (generation !== S.profileGeneration || !profileRegistry[S.activeProfile]?.available) return;
+    try {
+      applyOverview(await getJSON("/api/overview", generation));
+    } catch (_) {
+      if (generation === S.profileGeneration) {
+        S.accountError = "Dashboard connection lost; retrying live account data…";
+        S.positionsError = S.accountError;
+        renderHeader(); renderKpis(); renderPositions(); renderGuardrails();
+      }
+    }
+    if (generation !== S.profileGeneration || Date.now() - lastFallbackSlowPoll < 15000) return;
+    lastFallbackSlowPoll = Date.now();
+    try {
+      const [workflow, optimizer, tradeData, analytics] = await Promise.all([
+        getJSON("/api/workflow", generation),
+        getJSON("/api/optimizer", generation),
+        getJSON("/api/trades?limit=40", generation),
+        getJSON("/api/analytics", generation),
+      ]);
+      if (generation !== S.profileGeneration) return;
+      if (tradeData && !tradeData.error) {
+        S.tradeSummary = tradeData.summary;
+        S.recentTrades = tradeData.recent || [];
+        renderTrades(); renderJournal();
+      }
+      applySlow({workflow, optimizer, trade_summary: S.tradeSummary, analytics});
+    } catch (_) {}
+  };
+  lastFallbackSlowPoll = 0;
+  refresh();
+  pollTimer = setInterval(refresh, 5000);
 }
 
 function resolveAutoTimeframe() {
@@ -1960,6 +2082,36 @@ function toggleHistoryTable() {
 
 
 /* ============================ events ============================ */
+const navToggle = $("navToggle");
+const dashboardNav = $("dashboardNav");
+const railBackdrop = $("railBackdrop");
+const mobileNav = window.matchMedia("(max-width: 900px)");
+function setNavigationOpen(open, returnFocus = true) {
+  const isOpen = Boolean(open && mobileNav.matches);
+  dashboardNav.classList.toggle("is-open", isOpen);
+  railBackdrop.classList.toggle("is-open", isOpen);
+  document.body.classList.toggle("nav-open", isOpen);
+  navToggle.setAttribute("aria-expanded", String(isOpen));
+  navToggle.setAttribute("aria-label", isOpen ? "Close dashboard navigation" : "Open dashboard navigation");
+  if (isOpen) dashboardNav.querySelector("a")?.focus();
+  else if (returnFocus && mobileNav.matches) navToggle.focus();
+}
+navToggle.addEventListener("click", () => setNavigationOpen(navToggle.getAttribute("aria-expanded") !== "true", false));
+railBackdrop.addEventListener("click", () => setNavigationOpen(false));
+dashboardNav.querySelectorAll("a[href^='#']").forEach(link => {
+  link.addEventListener("click", () => {
+    dashboardNav.querySelectorAll("a[href^='#']").forEach(item => item.removeAttribute("aria-current"));
+    link.setAttribute("aria-current", "page");
+    setNavigationOpen(false, true);
+  });
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && navToggle.getAttribute("aria-expanded") === "true") setNavigationOpen(false);
+});
+mobileNav.addEventListener("change", event => {
+  if (!event.matches) setNavigationOpen(false, false);
+});
+
 const themeSelect = $("themeSelect");
 themeSelect.value = document.documentElement.getAttribute("data-theme") || "graphite";
 themeSelect.addEventListener("change", () => {

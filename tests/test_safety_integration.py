@@ -154,6 +154,44 @@ class TestMandateGate:
         violations = gate.check(context)
         assert any(v.violation_type == MandateViolationType.POSITION_CONCENTRATION_EXCEEDED for v in violations)
 
+    def test_daily_counters_restore_from_audit_entry_fields_after_restart(self, tmp_path, monkeypatch):
+        from safety.audit_ledger import AuditEntry, AuditEntryType
+
+        class Ledger:
+            def get_entries_for_date(self, date):
+                if date != "2099-01-02":
+                    return []
+                return [
+                    AuditEntry(
+                        entry_id="1", entry_type=AuditEntryType.ORDER_SUBMITTED,
+                        timestamp="2099-01-02T15:00:00+00:00",
+                        previous_hash="", entry_hash="", symbol="AAPL", side="buy",
+                        notional_usd=12000.0, qty=80, price=150.0,
+                    ),
+                    AuditEntry(
+                        entry_id="2", entry_type=AuditEntryType.ORDER_SUBMITTED,
+                        timestamp="2099-01-02T16:00:00+00:00",
+                        previous_hash="", entry_hash="", symbol="MSFT", side="buy",
+                        notional_usd=8000.0, qty=20, price=400.0,
+                    ),
+                ]
+
+        monkeypatch.setattr(
+            "safety.mandate_gate.datetime",
+            type("FixedDateTime", (), {
+                "now": staticmethod(lambda tz=None: datetime(2099, 1, 2, 17, 0, tzinfo=timezone.utc)),
+                "combine": staticmethod(datetime.combine),
+                "min": datetime.min,
+                "fromisoformat": staticmethod(datetime.fromisoformat),
+            }),
+        )
+        gate = MandateGate(audit_ledger=Ledger())
+
+        assert gate.get_daily_summary()["daily_notional_usd"] == 20000.0
+        assert gate.get_daily_summary()["daily_order_count"] == 2
+        assert gate.get_daily_summary()["daily_trade_count"] == 2
+        assert gate._get_symbol_daily_notional("AAPL") == 12000.0
+
     def test_blocks_daily_notional_cap(self):
         """Order exceeding daily notional cap is blocked."""
         gate = MandateGate()
