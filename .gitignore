@@ -45,6 +45,12 @@ strategy_state.json.pre_fix_backup
 runtime/secondary/
 .run_accounts.lock
 
+# Agent session artifacts: scratch plans/specs and the local worktrees the
+# harness drops alongside the repo. Never source; ignore wholesale.
+.claude/
+.superpowers/
+docs/superpowers/
+
 # Liveness heartbeat written by the live loop. Runtime state, not source.
 bot_heartbeat.json
 bot_heartbeat.tmp
